@@ -179,11 +179,27 @@ with no credential of any kind:
   `GET /api/reviews/<id>/file` (`src/server/server.ts:254-270`), which takes the
   path and the side as query parameters. It served a file the diff never
   touched. A `.env` committed at either pin would be readable the same way.
+- **A second read route serves raw bytes.** `GET /api/reviews/<id>/blob?path=…`
+  (`src/server/server.ts:353-369`) returns a file at the head commit
+  unrendered. It is narrower than `/file`: only the head side, and only
+  extensions on a fixed list of fonts, images and CSS
+  (`src/server/server.ts:118-129`), because it exists to serve the fonts and
+  images a themed review needs. Measured: it returned a CSS file the diff never
+  touched; `src/a.ts` was refused with `path must name a font, image or css
+file`. It widens nothing that `/file` does not already allow, but it belongs
+  on the list of the surface.
 - **The reach is bounded by the commit tree, not the filesystem.** `path=/etc/passwd`
   and `path=../../../../etc/passwd` both returned `not found at head`, because
   the read goes through `git show <commit>:<path>`. There is no directory escape.
+  The separate `/assets/` route serves only thurview's own bundled interface and
+  strips `..`; measured, `/assets/../../../../etc/passwd` returned the
+  application's own page.
 - **Writes are unauthenticated too.** A `POST` created a comment thread, which
   was stored; a `DELETE` destroyed an entire review and returned `{"ok":true}`.
+- **A change stream, also unauthenticated.** `GET /api/reviews/<id>/events` is a
+  server-sent-event stream that fires whenever the review directory changes
+  (`src/server/server.ts:340-352`). It carries no content — only the fact and the
+  timing of a change.
 
 For a team: **anyone on the tailnet who is permitted by the Tailscale ACL can
 list every review on that machine, read any file of the reviewed repository at
