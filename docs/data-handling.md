@@ -52,7 +52,7 @@ What each of those actually carries, measured:
 **The diff is not copied anywhere.** After publishing a review whose diff adds
 the synthetic AWS key, `grep -rl AKIAIOSFODNN7EXAMPLE` over the entire store
 returned nothing. The server recomputes the diff from git on each request
-(`/api/reviews/<id>/diff`, `src/server/server.ts:230-255`, which calls
+(`/api/reviews/<id>/diff`, `src/server/server.ts:231-253`, which calls
 `showFile` at both pins). The review's contents therefore live, for the most
 part, where they already lived: in the git repository.
 
@@ -176,9 +176,9 @@ with no credential of any kind:
   review on the machine — id, title, the absolute path of the worktree, and the
   pinned commits. Knowing the URL is not the barrier; there is no barrier.
 - **Any file at the pinned commits is readable**, through
-  `GET /api/reviews/<id>/file`, which takes the path and the side as query
-  parameters. It served a file the diff never touched. A `.env` committed at
-  either pin would be readable the same way.
+  `GET /api/reviews/<id>/file` (`src/server/server.ts:254-270`), which takes the
+  path and the side as query parameters. It served a file the diff never
+  touched. A `.env` committed at either pin would be readable the same way.
 - **The reach is bounded by the commit tree, not the filesystem.** `path=/etc/passwd`
   and `path=../../../../etc/passwd` both returned `not found at head`, because
   the read goes through `git show <commit>:<path>`. There is no directory escape.
