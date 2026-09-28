@@ -41,13 +41,13 @@ and writes `document.json`, `map.json`, `changes.json`, `coverage.json`,
 
 What each of those actually carries, measured:
 
-| Artefact | Carries | Evidence |
-|---|---|---|
-| `changes.json` | Path, status, added/deleted counts. **No content.** | Measured: `[{"path":"src/config.ts","status":"M","additions":2,"deletions":1,"binary":false}]` |
-| `document.json` | The prose, **and verbatim source for every anchor with a `peek`** | Measured: the marker from a file outside the diff was found here |
-| `graph/<sha>.json` | Every parseable file path and every symbol name in the **whole repository** at both pinned commits | Measured, see below |
-| `threads.json` | The reader's and the agent's comments verbatim | Measured: a posted comment appeared in the file unchanged |
-| the diff itself | **Not stored.** Rendered from git per request | Measured, see below |
+| Artefact           | Carries                                                                                            | Evidence                                                                                       |
+| ------------------ | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `changes.json`     | Path, status, added/deleted counts. **No content.**                                                | Measured: `[{"path":"src/config.ts","status":"M","additions":2,"deletions":1,"binary":false}]` |
+| `document.json`    | The prose, **and verbatim source for every anchor with a `peek`**                                  | Measured: the marker from a file outside the diff was found here                               |
+| `graph/<sha>.json` | Every parseable file path and every symbol name in the **whole repository** at both pinned commits | Measured, see below                                                                            |
+| `threads.json`     | The reader's and the agent's comments verbatim                                                     | Measured: a posted comment appeared in the file unchanged                                      |
+| the diff itself    | **Not stored.** Rendered from git per request                                                      | Measured, see below                                                                            |
 
 **The diff is not copied anywhere.** After publishing a review whose diff adds
 the synthetic AWS key, `grep -rl AKIAIOSFODNN7EXAMPLE` over the entire store
@@ -175,9 +175,10 @@ with no credential of any kind:
 - **The review id does not have to be guessed.** `GET /api/reviews` lists every
   review on the machine — id, title, the absolute path of the worktree, and the
   pinned commits. Knowing the URL is not the barrier; there is no barrier.
-- **Any file at the pinned commits is readable.** `GET
-  /api/reviews/<id>/file?path=…&graph=head|base` served a file the diff never
-  touched. A `.env` committed at either pin would be readable the same way.
+- **Any file at the pinned commits is readable**, through
+  `GET /api/reviews/<id>/file`, which takes the path and the side as query
+  parameters. It served a file the diff never touched. A `.env` committed at
+  either pin would be readable the same way.
 - **The reach is bounded by the commit tree, not the filesystem.** `path=/etc/passwd`
   and `path=../../../../etc/passwd` both returned `not found at head`, because
   the read goes through `git show <commit>:<path>`. There is no directory escape.
