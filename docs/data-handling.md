@@ -228,9 +228,12 @@ id and the reply prose.
 
 So what is posted is **the reader's and agent's own prose, plus file paths and
 line numbers** — which is what a review comment is. No diff, no file contents, no
-graph. The host is the one in the repository's own remote (`--hostname` comes
-from the parsed remote, `src/forge/github.ts:130`), so for a team on their own
-GitHub Enterprise or GitLab, the review never leaves their forge.
+graph. That `--hostname` is passed at all was measured; **that it carries the
+repository's own host is read from the code, not run**: `repoOf` shells out to
+`git remote get-url origin` and `parseRemote` takes the host out of that URL
+(`src/forge/index.ts:47-48`, `src/forge/github.ts:358-365`). On that reading, a
+team on their own GitHub Enterprise or GitLab keeps the review inside their own
+forge.
 
 Two caveats worth stating plainly. The prose is passed through **verbatim** — a
 key typed into a comment is posted as typed. And path and line anchors are
