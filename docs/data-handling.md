@@ -25,12 +25,15 @@ established at all.
     symbol `neverChangedByThisDiff` in `src/untouched-module.ts`, both in files
     the diff **never touches**;
   - a marker in a commit body, and a `.env.example` nobody points at, for the
-    commit and explainer routes.
+    commit and explainer routes;
+  - `SYNTHETIC-OUTSIDE-SCOPE-3e91` in `secrets/keystore.properties`, a file
+    outside the path scope an explainer declared.
 - **What was driven.** Reviews and an explainer were scaffolded, published and
   deleted. A server was raised and driven from its tailnet address. The forge
   adapter's `submit` and `reply` were driven against a fake `gh`, and
-  `update --check` was run with `fetch` interposed. **No real secret was read or
-  used at any point.**
+  `update --check` was run with `fetch` interposed. An explainer was published
+  with a declared path scope and then asked for a file outside it. **No real
+  secret was read or used at any point.**
 - **This document was reviewed** by a second, independent pass over it and the
   sources, which overturned two of its claims and added three findings. What that
   pass corrected is in the text; what it could not check is in the last section.
@@ -403,36 +406,146 @@ their own forge.
 Section 2's answer is "nothing is redacted", so this names what could exist.
 Scope and place only; none of it is implemented here.
 
-1. **An ignore list.** A path matcher — `.thurviewignore` at the repository root,
-   or a key in the `THURVIEW.md` the tool already reads (`src/cli.ts:326`) —
-   consulted wherever file content is read. There are three call sites and they
-   are narrow: `showFile` in `src/git.ts:84`, which both server endpoints go
-   through, and the peek resolution in `src/document/compile.ts:239-276`.
-   **Small:** one matcher, three call sites, plus the decision about what an
-   ignored file looks like in the UI (absent, or present and refused).
+### A declared review scope, and where the filter belongs
 
-2. **A scan for known secret shapes before `publish`.** `compileDocument`
-   (`src/cli.ts:1193-1201`) already walks every anchor and resolves its peek, and
-   its diagnostics become the rows counted just after
-   (`src/cli.ts:1215-1220`). A scanner belongs there, over the peeked ranges and
-   over the diff at the pins. **Medium:** hanging it off that pass is cheap, the
-   rule set and its false-positive rate are the real work.
+One team adopting this process declares the scope of its own automated review as
+an allowlist of extensions, a short list of bare filenames, and positional
+directory exclusions, and asked whether thurview should declare a scope the same
+way. The answer is yes in shape, and specifically an allowlist rather than an
+ignore list: a denylist covers only the file types someone remembered.
 
-3. **Refusing to publish on a match.** One more `error`-level diagnostic in the
-   pass above, which already fails `publish` when `errors` is non-zero
-   (`src/cli.ts:1221-1222`), with a flag to override. **Trivial on top of 2.**
+#### What thurview has today: accounting, not a filter
 
-4. **Not asked for, but larger than all three: the server.** Section 4 is a
-   bigger exposure than the absence of redaction, because it needs no secret in
-   the code at all, and because the writes — a comment, and a verdict the agent
-   then acts on — are not a disclosure problem but an integrity one. Two shapes,
-   both cheap in code: default `opts.hosts` to loopback and make the tailnet an
-   explicit opt-in — `opts.hosts` is already a parameter
-   (`src/server/server.ts:418`), so this is a flag and a default; or add a shared
-   token to the URL and check it in the request handler. The second is more work
-   because the browser app and the `reviewUrl` helper both have to carry it. If
-   only one thing is done, gating the mutating routes — `submit`, `DELETE`,
-   `threads` — is worth more than gating the reads.
+- **`scaffold` takes no path scope at all.** Its flags are `pr`, `base`, `head`,
+  `title`, `new`, `update`, `review`, `forge` and `repo`
+  (`src/cli.ts:601-626`). A review's scope is its diff, and nothing narrows it.
+- **`explain` and `design` do take one**, positionally (`src/cli.ts:529`,
+  `src/coverage.ts:87`), stored as `binding: {kind: "codebase", name: "src/**"}`.
+- **That scope reaches coverage accounting and stops there.** `scopeGlob` and
+  `scopeGraph` are referenced from `src/coverage.ts` and from `src/cli.ts:529`
+  and `:1635`, nowhere else. The word `scope` does not occur in
+  `src/server/server.ts`.
+- **Measured consequence.** An explainer published with the scope `src` recorded
+  `total: 1, uncovered: []` in `coverage.json` and never mentioned the
+  out-of-scope file. Asking that same review's file endpoint for
+  `secrets/keystore.properties` returned it in full, with the synthetic marker
+  `SYNTHETIC-OUTSIDE-SCOPE-3e91` in it.
+
+A declared scope today is a claim about what the write-up covers, not a boundary
+on what can be read. A team told "this review is scoped to `src`" would be told
+something true about the document and false about the server.
+
+#### Where the filter belongs: both places
+
+That script needs one filter because it has one consumer, the model it posts the
+diff to. thurview has two, and they are fed from different places:
+
+- **What is sealed on disk** — peeked source copied into
+  `revisions/<n>/document.json` at `publish`
+  (`src/document/compile.ts:239-276`), the graph cache's paths and symbol names
+  for the whole repository, and an explainer's full file listing in
+  `coverage.json`.
+- **What the browser reads** — the diff, file contents, raw blobs, commit
+  messages and the symbol index are **not** read from the sealed revision. They
+  are read from git at request time at the pinned commits, which is exactly why
+  section 4's unauthenticated reader can fetch a file nobody anchored.
+
+Neither place alone is enough, and the two failures differ:
+
+- A filter only at bundle build leaves every read route serving anything at the
+  pins. Given section 4 that is the larger hole, and a scope declared but not
+  enforced there is worse than none, because it reads as an assurance.
+- A filter only at serving leaves peeked content, graph paths and coverage
+  listings on disk under `0644` on a shared machine (section 3), and in every
+  copy of that store.
+
+**One declaration, two enforcement points** is the shape: a refusal at `publish`
+and a refusal in the request handler, from the same matcher.
+
+#### The four properties of that scheme, assessed
+
+1. **Allowlist rather than denylist — endorse, and it matters more here than in
+   a diff-only pipeline.** Every content route takes a path and reads it at a
+   commit; nothing enumerates what is reviewable. An allowlist inverts that default, so `.env`,
+   `.jks`, `.keystore`, `.p12` and `google-services.json` fail by absence rather
+   than by being remembered. This is the property that does the work.
+2. **A separate list of bare filenames — necessary, and for a second reason.**
+   thurview is language-agnostic, so extensionless cases are more numerous than
+   in a single-language repository: `Dockerfile`, `Makefile`, `Jenkinsfile`, and
+   dotfiles whose entire name is the suffix.
+3. **Positional directory exclusion — endorse, and note thurview ships the naive
+   form today.** `src/graph.ts:199` skips `node_modules`, `dist`, `build`,
+   `vendor`, `target` and `.git` at _any_ segment. Harmless for build output;
+   wrong for a user-written rule, where "any segment named `test`" would drop a
+   working package whose own name ends in `test`. A declared scope should match
+   from the first segment, as that script does.
+4. **Rules in the repository under review rather than in the tool's own code —
+   yes, with one caveat.** thurview already loads a per-repository `THURVIEW.md`
+   from the repository root and from the store (`src/cli.ts:326`), so both the
+   loader shape and the precedent exist. The caveat: a scope file inside the
+   reviewed tree can be widened by the same change request being reviewed. That
+   is visible in the diff, which beats invisible, but it makes such a file a
+   control against accident, not against a hostile author. A scope that must
+   hold regardless belongs beside the store's `THURVIEW.md`, outside the tree.
+
+#### What the change would touch, and how big it is
+
+- **Loader and matcher.** Beside `guidanceFiles` (`src/cli.ts:326`), plus one
+  pure `inScope(path)` carrying the positional rule. **Small**; the matcher is
+  the part that wants unit tests, and that script is a usable specification.
+- **Build-side refusal.** Peek resolution
+  (`src/document/compile.ts:239-276`) is the single place file content enters a
+  revision, and `compileDocument`'s diagnostics (`src/cli.ts:1193-1201`,
+  `:1215-1220`) already fail `publish` when one is an error
+  (`src/cli.ts:1221-1222`). An out-of-scope peek becomes an error there.
+  **Small**, and it hands the author a message instead of an empty peek.
+- **Serve-side refusal.** `showFile` (`src/git.ts:84`) covers both `/diff` and
+  `/file`. Three routes bypass it and need their own check: `/blob` runs
+  `git show` directly (`src/server/server.ts:353-369`), `/symbols` reads the
+  graph index, and `/commits` returns commit prose, which is not a path question
+  at all. **Small in code, with one decision to make:** an excluded path should
+  answer "excluded by scope" rather than 404, or the reader reads it as a bug.
+- **Coverage and the interface.** `coverage.json` has to distinguish "outside the
+  declared scope" from "in scope and not examined", and the Files tab has to show
+  that something was withheld. **Medium, and the real cost of the feature** — a
+  reader who silently sees a smaller change than was made is worse off than one
+  who sees all of it.
+- **Graph and cache.** The graph is built over the whole repository at both pins
+  before any scoping (`src/graph.ts:232`) and cached per commit sha, so a scope
+  has to enter the cache key or a cache built without one keeps answering.
+  **Small, and easy to miss.**
+
+Two things a path scope does not solve, and they should not be sold as solved:
+commit messages, since `/commits` carries the body verbatim and no path filter
+touches prose; and section 4, since an allowlist bounds what an unauthenticated
+reader can fetch but does nothing about what they can write.
+
+### A scan for known secret shapes before `publish`
+
+`compileDocument` (`src/cli.ts:1193-1201`) already walks every anchor and
+resolves its peek, and its diagnostics become the rows counted just after
+(`src/cli.ts:1215-1220`). A scanner belongs there, over the peeked ranges and
+over the diff at the pins. **Medium:** hanging it off that pass is cheap, the
+rule set and its false-positive rate are the real work.
+
+### Refusing to publish on a match
+
+One more `error`-level diagnostic in the pass above, which already fails
+`publish` when `errors` is non-zero (`src/cli.ts:1221-1222`), with a flag to
+override. **Trivial on top of the scanner.**
+
+### Not asked for, but larger than all of it: the server
+
+Section 4 is a bigger exposure than the absence of redaction, because it needs no
+secret in the code at all, and because the writes — a comment, and a verdict the
+agent then acts on — are an integrity problem rather than a disclosure one. Two
+shapes, both cheap in code: default `opts.hosts` to loopback and make the tailnet
+an explicit opt-in — `opts.hosts` is already a parameter
+(`src/server/server.ts:418`), so this is a flag and a default; or add a shared
+token to the URL and check it in the request handler. The second is more work
+because the browser app and the `reviewUrl` helper both have to carry it. If only
+one thing is done, gating the mutating routes — `submit`, `DELETE`, `threads` — is
+worth more than gating the reads.
 
 ## What was not established
 
@@ -449,6 +562,10 @@ Scope and place only; none of it is implemented here.
   external URL is the SVG XML namespace, which is not a request, and the page
   references only same-origin assets — but what the interface stores locally and
   what it posts were not examined.
+- **Only one form of declared scope was exercised.** A bare `src` became the
+  glob `src/**` (`src/coverage.ts:87`). How a deeper path or an explicit pattern
+  behaves was read from that function, not measured — and it makes no difference
+  to the finding above, which is that the server never consults the scope at all.
 - **Design documents were not exercised.** Reviews and an explainer were
   published; `thurview design` was not run, and it may scope differently.
 - **CSRF and DNS rebinding were not tested.** The absence of an `Origin` check is
