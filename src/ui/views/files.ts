@@ -10,6 +10,20 @@ export function renderFiles(root: HTMLElement): void {
   const changes = state.data?.changes ?? [];
   const path = state.params.get("path") ?? changes[0]?.path ?? "";
   const list = h("div", { class: "file-list" });
+  const scope = state.data?.scope;
+  // A path the rules withhold is absent from `changes` and from every read
+  // route, so without this line the reader has no way to tell a small change
+  // from a filtered one.
+  if (scope?.declared && scope.withheld)
+    list.appendChild(
+      h(
+        "div",
+        { class: "scope-note" },
+        h("b", null, `${scope.withheld} file${scope.withheld === 1 ? "" : "s"} withheld`),
+        " by the review scope this repository declares.",
+        h("span", { class: "rules" }, scope.verdict),
+      ),
+    );
   for (const c of changes) {
     const n = (state.data?.threads ?? []).filter(
       (t) => t.target.type === "file" && t.target.path === c.path && t.status === "open",

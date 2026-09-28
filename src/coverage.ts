@@ -16,6 +16,7 @@
  */
 import { globToRegExp } from "./document/compile.js";
 import { architecture, isGraphLanguage, type CodeGraph, type Sym } from "./graph.js";
+import { SCOPE_FILE } from "./scope.js";
 
 /** How a file at the pinned commit is accounted for. */
 export type FileState =
@@ -52,6 +53,14 @@ export interface Coverage {
     outsideGraph: number;
     /** in-scope files in a graph language, skipped only because the repo-wide file cap was hit before scoping */
     capped: number;
+    /**
+     * Files at the pinned commit inside the path scope that the repository's
+     * declared review scope withholds. They are counted and nowhere else: not in
+     * `total`, not in `states`, not in `uncovered`. "Withheld by a rule" and "in
+     * scope and never examined" are different facts, and a reader who cannot
+     * tell them apart is being told the document is more complete than it is.
+     */
+    excludedByScope: number;
   };
   states: { explained: number; placed: number; uncovered: number };
   clusters: ClusterCoverage[];
@@ -140,12 +149,17 @@ export interface CoverageInput {
   anchored: Iterable<string>;
   /** map nodes and the globs they own */
   owners: { node: string; globs: string[] }[];
+  /** the repository's declared review scope; a path it excludes is counted and never listed */
+  inScope?: (path: string) => boolean;
 }
 
 /** Account for every file in scope at the pinned commit. */
 export function computeCoverage(input: CoverageInput): Coverage {
   const glob = scopeGlob(input.scope);
-  const inScope = glob === "**" ? () => true : (f: string) => globToRegExp(glob).test(f);
+  const declared = input.inScope ?? (() => true);
+  const inPathScope = glob === "**" ? () => true : (f: string) => globToRegExp(glob).test(f);
+  const inScope = (f: string) => inPathScope(f) && declared(f);
+  const excludedByScope = input.allFiles.filter((f) => inPathScope(f) && !declared(f)).length;
   const files = input.allFiles.filter(inScope);
   const graph = scopeGraph(input.graph, glob);
   const inGraph = new Set(graph.files);
@@ -239,6 +253,7 @@ export function computeCoverage(input: CoverageInput): Coverage {
       inGraph: graph.files.length,
       outsideGraph: outsideGraphCount,
       capped,
+      excludedByScope,
     },
     states,
     clusters,
@@ -283,5 +298,9 @@ function coverageVerdict(c: Coverage): string {
     c.files.capped > 0
       ? ` ${c.files.capped} of them were skipped by the repo-wide file cap; treat every count as a floor.`
       : "";
-  return `${parts.join(", ")}.${outside}${capped}`;
+  const excluded =
+    c.files.excludedByScope > 0
+      ? ` A further ${c.files.excludedByScope} file${c.files.excludedByScope === 1 ? " is" : "s are"} withheld by the review scope this repository declares in ${SCOPE_FILE}, and counted nowhere above.`
+      : "";
+  return `${parts.join(", ")}.${outside}${capped}${excluded}`;
 }

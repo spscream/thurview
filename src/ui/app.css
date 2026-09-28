@@ -782,6 +782,27 @@ kbd {
   background: var(--bg2);
   font-size: 12.5px;
 }
+/* What the declared review scope withheld. It sits at the top of the file list
+   rather than in a corner: a reader who is seeing a shorter change than was made
+   has to be told so before they read it, not after. */
+.file-list .scope-note {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.file-list .scope-note b {
+  color: var(--warn);
+  font-weight: 700;
+}
+.file-list .scope-note .rules {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  word-break: break-word;
+}
 .file-list .item {
   padding: 6px 10px;
   cursor: pointer;
