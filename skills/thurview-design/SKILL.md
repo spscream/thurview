@@ -76,7 +76,8 @@ Read the guidance files that exist, in this order; the second wins on conflict.
 
 A repository may also declare a **review scope** in `thurview-scope.yaml` at its
 root: an allowlist of extensions, a list of whole file names, and directories
-excluded from the first segment of the path. It is not guidance - it is
+or globs excluded from the first segment of the path (`*/test` is each top-level
+module's `test`, `**/test` one at any depth). It is not guidance - it is
 enforced. A peek at a path it withholds fails `publish`, as does a `theme.yaml`
 font inside one, and the reader's browser is refused the same path with
 "excluded by scope". When rules are declared the command prints them under
