@@ -24,7 +24,9 @@
  * alone. Any-segment matching is right for a tool's own list of build output -
  * `graph.ts`'s SKIP says why it keeps it - and wrong for a rule a person wrote,
  * where "any segment named `test`" silently drops a package whose own name ends
- * in `test`.
+ * in `test`. An entry may hold a glob, and it is still anchored at the first
+ * segment: `*` is one segment, so a `*` then `test` is the `test` directory of
+ * every top-level module, and reaching any depth takes a `**` somebody wrote.
  *
  * The rules are read from the repository under review, at the pinned head
  * commit, which means the change request being reviewed can edit them. That is
@@ -50,7 +52,7 @@ const ScopeSchema = z
     extensions: list,
     /** allowed whole file names, matched exactly - for the extensionless and the dotfiles */
     filenames: list,
-    /** directory paths excluded from the first segment of the path, not at any segment */
+    /** directory paths or globs excluded from the first segment of the path, not at any segment */
     exclude: list,
   })
   .strict()
@@ -101,6 +103,103 @@ function clean(path: string): string {
     .join("/");
 }
 
+/**
+ * The characters that make an `exclude` entry a glob. Exactly the ones the rules
+ * refused before globs were read, so every entry a repository could already
+ * declare is still a literal path and matches exactly what it matched then.
+ */
+const GLOB = /[*?[\]]/;
+
+/**
+ * One segment of a glob against one segment of a path: `*` is any run of
+ * characters and `?` any one, neither crossing a `/` because a segment holds
+ * none. Matched with two pointers rather than a regular expression, because the
+ * rules come from the change under review, and `*a*a*a*...` in a backtracking
+ * regex holds the server's one thread for seconds on a single path.
+ */
+function segmentMatches(glob: string, seg: string): boolean {
+  let g = 0;
+  let s = 0;
+  let star = -1;
+  let mark = 0;
+  while (s < seg.length) {
+    if (g < glob.length && (glob[g] === "?" || glob[g] === seg[s])) {
+      g++;
+      s++;
+    } else if (g < glob.length && glob[g] === "*") {
+      star = g++;
+      mark = s;
+    } else if (star >= 0) {
+      g = star + 1;
+      s = ++mark;
+    } else return false;
+  }
+  while (g < glob.length && glob[g] === "*") g++;
+  return g === glob.length;
+}
+
+/** A segment every path segment matches: `**`, or `*`s with at most one `?` beside them. */
+function matchesAnySegment(seg: string): boolean {
+  return seg === "**" || (/^[*?]+$/.test(seg) && seg.includes("*") && seg.split("?").length <= 2);
+}
+
+/**
+ * Compile one glob entry to a test on a path's segments. The entry is anchored
+ * at the first segment and matches a prefix of the path, exactly as a literal
+ * entry does: the path is excluded when its first few segments match every
+ * segment of the entry. `*` stays inside one segment; `**`, only as a whole
+ * segment, stands for zero or more of them.
+ */
+export function compileGlob(entry: string): (segments: string[]) => boolean {
+  const segs = entry.split("/");
+  for (const seg of segs) {
+    if (seg.includes("**") && seg !== "**")
+      throw new ScopeError(
+        `exclude: "${entry}" puts "**" inside a segment, and "**" stands only for whole segments (write "**/test", not "**test")`,
+      );
+    // A bracket is refused rather than read as a class: `app/[id]` is a route
+    // directory in half the web frameworks, and a class would read it as "one
+    // `i` or `d`" and leave the real directory open. Refused, it stays the
+    // error it was before globs were read.
+    if (/[[\]]/.test(seg))
+      throw new ScopeError(
+        `exclude: "${entry}" holds a bracket, and exclude reads no character classes - exclude the directory's parent, or write "?" for each bracket`,
+      );
+  }
+  const parts = segs.map((seg) => (seg === "**" ? ("**" as const) : seg));
+  if (segs.every(matchesAnySegment))
+    throw new ScopeError(
+      `exclude: "${entry}" matches every path, which excludes the whole repository`,
+    );
+  return (path) => {
+    // Which (entry segment, path segment) pairs were already tried: `**` can
+    // reach one pair by several routes, and a path is short but not free.
+    const seen = new Set<number>();
+    const at = (e: number, p: number): boolean => {
+      if (e === parts.length) return true;
+      const key = e * (path.length + 1) + p;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      const part = parts[e]!;
+      if (part === "**") return at(e + 1, p) || (p < path.length && at(e, p + 1));
+      return p < path.length && segmentMatches(part, path[p]!) && at(e + 1, p + 1);
+    };
+    return at(0, 0);
+  };
+}
+
+/**
+ * The test one `exclude` entry puts to a path, literal or glob alike, for the
+ * callers that ask about a single entry rather than the whole scope: `publish`
+ * warns about each entry that holds nothing out. Takes the entry as `exclude`
+ * holds it, already cleaned and validated by `makeScope`.
+ */
+export function excludeMatcher(entry: string): (path: string) => boolean {
+  if (!GLOB.test(entry)) return (path) => path === entry || path.startsWith(`${entry}/`);
+  const glob = compileGlob(entry);
+  return (path) => glob(clean(path).split("/"));
+}
+
 function extensionOf(path: string): string {
   const name = path.split("/").pop() ?? path;
   const dot = name.lastIndexOf(".");
@@ -140,17 +239,18 @@ export function makeScope(raw: unknown): ReviewScope {
       throw new ScopeError(
         `filenames: "${f}" is a path, and filenames matches a whole file name anywhere in the tree (write "Dockerfile", not "src/Dockerfile")`,
       );
+  // A glob with an empty segment is refused before `clean` would quietly fold
+  // it away: `*//test` is a typo for something, and guessing which one is how a
+  // rule comes to exclude less than its author meant.
+  for (const e of parsed.data.exclude)
+    if (GLOB.test(e) && /[^/]\/\/+[^/]/.test(e))
+      throw new ScopeError(`exclude: "${e}" holds an empty segment between two "/"`);
   const exclude = [...new Set(parsed.data.exclude.map(clean))].sort();
   for (const e of exclude) {
     if (!e) throw new ScopeError("exclude: an empty path excludes the whole repository");
-    // A glob here would read as working and quietly match nothing: the rule is
-    // positional by design, so say so rather than accept `**/test` and drop it.
-    if (/[*?[\]]/.test(e))
-      throw new ScopeError(
-        `exclude: "${e}" is a glob, and exclude takes a directory path matched from the first segment (write "app/src/test", not "**/test")`,
-      );
     if (e.split("/").includes("..")) throw new ScopeError(`exclude: "${e}" leaves the repository`);
   }
+  const excluders = exclude.map(excludeMatcher);
   const digest = createHash("sha256")
     .update(JSON.stringify({ extensions, filenames, exclude }))
     .digest("hex")
@@ -165,7 +265,7 @@ export function makeScope(raw: unknown): ReviewScope {
     // withheld has to be able to read the rule that withheld it, and that rule
     // is part of the change request under review.
     if (p === SCOPE_FILE) return true;
-    for (const dir of exclude) if (p === dir || p.startsWith(`${dir}/`)) return false;
+    if (excluders.some((x) => x(p))) return false;
     const name = p.split("/").pop() ?? p;
     if (filenames.includes(name)) return true;
     const ext = extensionOf(p);
@@ -226,7 +326,12 @@ export function allowsEverything(now: ReviewScope, sealed: SealedRules): boolean
   if (!covers(now.extensions, sealed.extensions)) return false;
   if (!covers(now.filenames, sealed.filenames)) return false;
   // Every directory excluded now must already have been excluded then, or this
-  // scope withholds something the revision was allowed to seal.
+  // scope withholds something the revision was allowed to seal. Compared as
+  // text, globs included: an entry that extends a sealed one by whole segments
+  // matches only paths the sealed one already held out, whatever either holds.
+  // A glob that covers a literal (`*/test` sealed, `app/test` now) is not
+  // recognised, and that errs toward refusing the revision, never toward
+  // serving it.
   return now.exclude.every((dir) =>
     sealed.exclude.some((s) => dir === s || dir.startsWith(`${s}/`)),
   );

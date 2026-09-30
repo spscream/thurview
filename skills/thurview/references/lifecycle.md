@@ -149,10 +149,15 @@ read from git at the pinned head commit every time it is needed, so the rules a
 document is held to are the ones the reviewed commit carries. The graph cache
 carries the rules' digest in its file name for the same reason - a graph built
 under one set of rules must never answer for another, or narrowing them would
-keep serving the paths they just excluded. Each sealed revision records the rules
-it was sealed under, in full, in its `meta.json`: widening them later leaves it
-readable, because it holds only what the older rules allowed, while narrowing
-them makes it refuse until a revision is published under the rules in force.
+keep serving the paths they just excluded. An `exclude` glob is part of the rules
+the digest is taken over, as written, so adding or changing one builds a new
+graph rather than reusing the old. Each sealed revision records the rules
+it was sealed under, in full, in its `meta.json`, globs as written: widening them
+later leaves it readable, because it holds only what the older rules allowed,
+while narrowing them makes it refuse until a revision is published under the
+rules in force. Globs are compared as text, so an entry that only extends a
+sealed one by whole segments counts as no narrowing, and a glob the server
+cannot prove covers a sealed entry counts as narrowing and refuses.
 
 A failed publish leaves the last sealed revision in place. The reader can
 switch between revisions in the browser.

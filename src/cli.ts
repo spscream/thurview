@@ -41,7 +41,14 @@ import {
   type Thread,
 } from "./store.js";
 import { compileDocument, compileMap, globToRegExp, type Diagnostic } from "./document/compile.js";
-import { changeInScope, scopeAt, ScopeError, SCOPE_FILE, type ReviewScope } from "./scope.js";
+import {
+  changeInScope,
+  excludeMatcher,
+  scopeAt,
+  ScopeError,
+  SCOPE_FILE,
+  type ReviewScope,
+} from "./scope.js";
 import {
   computeCoverage,
   scopeGlob,
@@ -1239,11 +1246,13 @@ const commands: Record<string, (args: string[]) => Promise<Out>> = {
     // path instead of closing it, while the verdict goes on claiming an excluded
     // directory: `Secrets` withholds nothing where `secrets` withholds a tree.
     // A warning rather than an error, because excluding a directory before it
-    // exists is a legitimate thing to write.
+    // exists is a legitimate thing to write. A glob is asked the same question
+    // through the same matcher the routes use: `*/tests` where the modules say
+    // `test` is exactly the typo this is here for.
     if (scope.exclude.length) {
       const tree = await g.listFiles(review.worktree, review.pins.head);
       for (const dir of scope.exclude)
-        if (!tree.some((f) => f === dir || f.startsWith(`${dir}/`)))
+        if (!tree.some(excludeMatcher(dir)))
           diags.push({
             level: "warning",
             file: SCOPE_FILE,

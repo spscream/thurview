@@ -231,11 +231,12 @@ describe("the matcher", () => {
     expect(scope.inScope(SCOPE_FILE)).toBe(true);
   });
 
-  it("refuses a glob under exclude rather than matching nothing quietly", () => {
-    expect(() => makeScope({ extensions: ["ts"], exclude: ["**/test"] })).toThrow(ScopeError);
-    expect(() => makeScope({ extensions: ["ts"], exclude: ["**/test"] })).toThrow(
-      /positional|glob/,
-    );
+  it("reads a glob under exclude, still anchored at the first segment", () => {
+    // scope-globs.test.ts drives globs through publish and the routes
+    const globbed = makeScope({ extensions: ["ts"], exclude: ["*/test"] });
+    expect(globbed.inScope("app/test/Helper.ts")).toBe(false);
+    expect(globbed.inScope("lib/app/test/Helper.ts")).toBe(true);
+    expect(() => makeScope({ extensions: ["ts"], exclude: ["app/*/**x"] })).toThrow(ScopeError);
   });
 
   it("refuses an entry that cannot match, rather than counting it as a rule", () => {

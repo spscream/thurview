@@ -277,9 +277,10 @@ reviewable. A repository can invert that with `thurview-scope.yaml` at its root.
 # thurview-scope.yaml - what a thurview document may read from this repository
 extensions: [ts, tsx, md, css] # allowed extensions, with or without the dot
 filenames: [Dockerfile, Makefile] # allowed whole names, for the extensionless
-exclude: # directories, matched from the first segment
+exclude: # directories or globs, matched from the first segment
   - secrets
   - app/src/generated
+  - "*/test" # the test directory of every top-level module
 ```
 
 A path is readable when its extension or its whole name is listed **and** no
@@ -294,15 +295,24 @@ A path is readable when its extension or its whole name is listed **and** no
   `Dockerfile`, `Makefile`, `Jenkinsfile` and a dotfile whose entire name is its
   suffix have no extension to allow.
 - **`exclude` matches from the first segment,** so `app/src/test` excludes that
-  directory and leaves `lib/app/src/test` alone. It takes directory paths, not
-  globs, and `publish` refuses a `**/test` rather than accepting it and matching
-  nothing.
+  directory and leaves `lib/app/src/test` alone. An entry may be a glob, and it
+  is anchored the same way: `*` is exactly one segment, so `*/test` excludes
+  `module-a/test` and every other top-level module's `test`, and leaves
+  `a/b/test` alone; `**` is zero or more segments, so `**/test` excludes a `test`
+  directory at any depth, the root one included. `?` matches one character
+  within a segment. There are no character classes: `[` and `]` are refused, so
+  a route directory such as `app/[id]` is an error rather than a class that
+  leaves it open. An entry without `*` or `?` is a plain path and matches
+  exactly what it did before globs were read.
 - **An entry that cannot match is refused where it is written.** `*.ts` or
-  `tar.gz` under `extensions`, a path under `filenames`, a glob under `exclude`:
-  each is an error, not a rule that quietly matches nothing. And because a wrong
-  `exclude` entry is the one mistake here that _opens_ a path rather than closing
-  it, `publish` warns when one matches nothing at the pinned commit - `Secrets`
-  withholds nothing where `secrets` withholds a tree.
+  `tar.gz` under `extensions`, a path under `filenames`, a glob under `exclude`
+  that cannot be read - a bracket, `***`, an empty segment, or one such as `**`
+  or `?*` that would exclude everything: each is an error, not a rule that quietly
+  matches nothing. And because a wrong `exclude` entry is the one mistake here
+  that _opens_ a path rather than closing it, `publish` warns when one matches
+  nothing at the pinned commit, glob or not - `Secrets` withholds nothing where
+  `secrets` withholds a tree, and so does `*/tests` where the modules say
+  `test`.
 - **A rename is shown only when both its sides are readable.** The diff of
   `secrets/token.ts -> src/token.ts` is the content of the excluded side, so the
   change is withheld whole and counted as withheld, rather than listed as a file
@@ -315,6 +325,7 @@ and symbol names and an explainer's coverage listing hold nothing excluded. At
 serving: the diff, the file, the raw blob, the symbol index and each commit's
 path list are read from git per request, and each refuses an excluded path with
 **"excluded by scope"** - not a 404, which would claim the file is not there.
+A glob is applied in both, through the same matcher.
 A theme is held to the rules too: a font under `theme.yaml`'s `fonts.files` is
 served over `/blob`, so naming one the rules withhold is a `publish` error rather
 than a stylesheet that resolves to a refusal and a fallback font in the reader's
