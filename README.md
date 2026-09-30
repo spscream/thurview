@@ -235,9 +235,10 @@ changes](./media/review-decision.png)
   exact code beside the text; peeks show it inline. Sequence diagrams, call
   stack diffs and storage views are clickable down to the line.
 - **Files**: split or unified diff of every changed file at the pinned
-  commits, with expandable context. Click a line number to comment on it.
-  Click an identifier to see where it is defined at that commit; Ctrl-click
-  jumps there.
+  commits, with expandable context. When the repository declares a review scope,
+  the head of the list says how many files it withheld and by which rules.
+  Click a line number to comment on it. Click an identifier to see where it is
+  defined at that commit; Ctrl-click jumps there.
 - **Commits**: the commits between base and head.
 - **Coverage** (explainers): every file in scope at the pinned commit, in one
   of three states - anchored in the document, placed on the map only, or not
@@ -265,6 +266,100 @@ machine on the tailnet can open the same URL. The layout follows: below 900px
 the rail and the split diff give way to one column, the peek and the threads
 panel become full-screen sheets, and the tabs and the decision stay on the
 bar.
+
+## Declaring what is in scope
+
+By default every path in the repository is readable at the pinned commits: each
+content route takes a path and reads it, and nothing enumerates what is
+reviewable. A repository can invert that with `thurview-scope.yaml` at its root.
+
+```yaml
+# thurview-scope.yaml - what a thurview document may read from this repository
+extensions: [ts, tsx, md, css] # allowed extensions, with or without the dot
+filenames: [Dockerfile, Makefile] # allowed whole names, for the extensionless
+exclude: # directories or globs, matched from the first segment
+  - secrets
+  - app/src/generated
+  - "*/test" # the test directory of every top-level module
+```
+
+A path is readable when its extension or its whole name is listed **and** no
+`exclude` entry is a prefix of it. Three things about those rules:
+
+- **It is an allowlist, not an ignore list.** An ignore list covers the file
+  types somebody remembered; an allowlist makes `.env`, `.jks`, `.keystore`,
+  `.p12` and `google-services.json` fail by absence. Declare at least one
+  extension or file name, or `publish` refuses the file rather than hiding the
+  whole repository.
+- **`filenames` is a list of its own,** because thurview is language-agnostic:
+  `Dockerfile`, `Makefile`, `Jenkinsfile` and a dotfile whose entire name is its
+  suffix have no extension to allow.
+- **`exclude` matches from the first segment,** so `app/src/test` excludes that
+  directory and leaves `lib/app/src/test` alone. An entry may be a glob, and it
+  is anchored the same way: `*` is exactly one segment, so `*/test` excludes
+  `module-a/test` and every other top-level module's `test`, and leaves
+  `a/b/test` alone; `**` is zero or more segments, so `**/test` excludes a `test`
+  directory at any depth, the root one included. `?` matches one character
+  within a segment. There are no character classes: `[` and `]` are refused, so
+  a route directory such as `app/[id]` is an error rather than a class that
+  leaves it open. An entry without `*` or `?` is a plain path and matches
+  exactly what it did before globs were read.
+- **An entry that cannot match is refused where it is written.** `*.ts` or
+  `tar.gz` under `extensions`, a path under `filenames`, a glob under `exclude`
+  that cannot be read - a bracket, `***`, an empty segment, or one such as `**`
+  or `?*` that would exclude everything: each is an error, not a rule that quietly
+  matches nothing. And because a wrong `exclude` entry is the one mistake here
+  that _opens_ a path rather than closing it, `publish` warns when one matches
+  nothing at the pinned commit, glob or not - `Secrets` withholds nothing where
+  `secrets` withholds a tree, and so does `*/tests` where the modules say
+  `test`.
+- **A rename is shown only when both its sides are readable.** The diff of
+  `secrets/token.ts -> src/token.ts` is the content of the excluded side, so the
+  change is withheld whole and counted as withheld, rather than listed as a file
+  whose diff is then refused.
+
+The rules apply in both places a document is read from, because they are fed
+from different places. At `publish`: a peek at an excluded file is an error, and
+the sealed revision's file list, its map's file lists, the code graph's paths
+and symbol names and an explainer's coverage listing hold nothing excluded. At
+serving: the diff, the file, the raw blob, the symbol index and each commit's
+path list are read from git per request, and each refuses an excluded path with
+**"excluded by scope"** - not a 404, which would claim the file is not there.
+A glob is applied in both, through the same matcher.
+A theme is held to the rules too: a font under `theme.yaml`'s `fonts.files` is
+served over `/blob`, so naming one the rules withhold is a `publish` error rather
+than a stylesheet that resolves to a refusal and a fallback font in the reader's
+browser.
+
+`thurview-scope.yaml` itself is always readable, so a reader can read the rule
+that withheld a file. A revision is served back exactly as it was sealed, so each
+one records the rules it was sealed under, in full. Widening them later costs
+nothing: a revision holds only what the rules in force when it was sealed let in,
+so if all of that is still allowed it stays readable. Narrowing them is what the
+record is for - the older revisions are refused with the same words until
+`thurview publish` seals one under the rules in force, and that is the deliberate
+price of not serving what the rules now withhold. `scaffold`, `explain`, `design`
+and `publish` print the rules and how many changed files they withheld, and the
+Files tab says so above the list; the count a reader sees is the one the revision
+they are reading was sealed with, so it describes that file list and not whatever
+the pins have moved on to.
+
+Two things the scope does **not** decide, and neither should be read into it:
+
+- **Commit messages.** `thurview-scope.yaml` is about paths. The per-commit file
+  list on the Commits tab is filtered; the subject, the body and the author are
+  served as git holds them.
+- **Writes.** A reader's comment and their verdict are their own words, posted
+  as typed. The scope bounds what can be read, not what can be written or sent
+  to a forge. A comment records the path its author pointed at, and it is served
+  back as they wrote it.
+
+And one thing about what kind of control it is: the rules live in the repository
+under review and are read at the pinned head commit, so **the change request
+being reviewed can edit them.** That edit is visible in the diff, which beats
+invisible, but it makes this a control against putting the wrong file in front
+of a reviewer by accident - not a boundary that holds against an author who does
+not want it to.
 
 ## CLI
 
@@ -396,12 +491,15 @@ diff does not show, a storage operation on an unknown field, a map edge
 to an unknown node, an interface annotation for a symbol the change did not
 move, a declared interface whose anchor holds no added or deleted line, a trust
 boundary crossing whose anchor resolves to nothing or reads the base commit, and
-an explainer that anchors nothing at all, and a design that proposes nothing or
-whose proposal names no site in the code as it stands. The full format is in
+an explainer that anchors nothing at all, a design that proposes nothing or
+whose proposal names no site in the code as it stands, and a peek at a path the
+repository's declared review scope withholds. The full format is in
 [skills/thurview/references](skills/thurview/references).
 
 Optional guidance for the agent: `~/.thurview/THURVIEW.md` for you,
-`THURVIEW.md` at a repository root for that repository.
+`THURVIEW.md` at a repository root for that repository. A repository can also
+declare which paths a document may read at all, in `thurview-scope.yaml` - see
+[Declaring what is in scope](#declaring-what-is-in-scope).
 
 ## Development
 

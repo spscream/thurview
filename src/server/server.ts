@@ -21,6 +21,7 @@ import {
   deleteReview,
   writeJson,
   serverStateFile,
+  type ReviewState,
   type ThreadTarget,
 } from "../store.js";
 import { queue } from "../queue.js";
@@ -32,6 +33,15 @@ import {
   deleteThread,
 } from "../threads.js";
 import { presenceOf } from "../presence.js";
+import {
+  allowsEverything,
+  changeInScope,
+  scopeAt,
+  OPEN_SCOPE,
+  SCOPE_FILE,
+  type ReviewScope,
+  type SealedRules,
+} from "../scope.js";
 
 const UI_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "ui");
 
@@ -79,6 +89,62 @@ async function findReview(idOrPrefix: string) {
   const all = (await listReviews()).filter((x) => x.id.startsWith(idOrPrefix));
   if (all.length === 1) return all[0]!;
   throw new HttpError(404, all.length ? "ambiguous review id" : "review not found");
+}
+
+/** The scope stamp a revision's `meta.json` carries, with the shape old revisions have. */
+function sealedRules(meta: unknown): SealedRules & { digest: string; withheld: number | null } {
+  const s =
+    meta && typeof meta === "object" && "scope" in meta
+      ? (
+          meta as {
+            scope?: {
+              declared?: boolean;
+              digest?: string;
+              extensions?: string[];
+              filenames?: string[];
+              exclude?: string[];
+              withheld?: number;
+            };
+          }
+        ).scope
+      : undefined;
+  return {
+    declared: s?.declared ?? false,
+    digest: s?.digest ?? OPEN_SCOPE.digest,
+    extensions: s?.extensions ?? [],
+    filenames: s?.filenames ?? [],
+    exclude: s?.exclude ?? [],
+    withheld: typeof s?.withheld === "number" ? s.withheld : null,
+  };
+}
+
+/**
+ * A revision is read back exactly as it was sealed, so the rules it was sealed
+ * under have to match the rules in force. They come apart in one ordinary way:
+ * a repository adds or narrows `thurview-scope.yaml` after a revision was
+ * published, and that revision still holds the peeked source, the file list and
+ * the coverage listing from before. Serving it would be the "declared but not
+ * enforced" failure by the back door, so it is refused and the message names the
+ * one command that fixes it.
+ *
+ * Widening the rules is not that case: a revision holds only what the rules in
+ * force when it was sealed let in, so if every path those rules allowed is still
+ * allowed, there is nothing in it to withhold and refusing it would cost the
+ * reader the history for nothing. The stamp records the rules in full so that
+ * question can be asked at all.
+ *
+ * A revision sealed before this stamp existed carries no `scope`. That reads as
+ * "sealed under no rules", which is what it was, so it is served unchanged while
+ * no rules are declared and refused once some are.
+ */
+function requireRevisionUnderScope(meta: unknown, n: number, scope: ReviewScope): void {
+  const sealed = sealedRules(meta);
+  if (sealed.digest === scope.digest) return;
+  if (allowsEverything(scope, sealed)) return;
+  throw new HttpError(
+    409,
+    `excluded by scope: revision ${n} was sealed under different rules than ${SCOPE_FILE} declares at the pinned head commit, so what it holds cannot be shown under the rules in force. Run \`thurview publish\` to seal a revision under them.`,
+  );
 }
 
 async function revisionData(id: string, n: number) {
@@ -141,6 +207,45 @@ export function tailscaleAddresses(): string[] {
   return out;
 }
 
+/**
+ * The review scope the reviewed repository declares at the pinned head commit.
+ *
+ * Every content route below goes through this. `showFile` covers `/diff` and
+ * `/file`, but `/blob` shells out to `git show` on its own, `/symbols` answers
+ * from the symbol index and `/commits` carries a path list per commit - so a
+ * check in one place would leave three routes serving what the rules withhold,
+ * and a scope declared but not enforced reads as an assurance it is not.
+ *
+ * Malformed rules fail the request rather than falling back to an open scope.
+ * `publish` refuses a document whose rules do not parse, so this is the case
+ * where somebody edited the file after publishing; answering as though no scope
+ * were declared is the one outcome that must not happen.
+ */
+async function scopeOf(review: ReviewState): Promise<ReviewScope> {
+  try {
+    return await scopeAt(review.worktree, review.pins.head);
+  } catch (e) {
+    throw new HttpError(
+      500,
+      `${SCOPE_FILE} at the pinned head commit does not parse, so the review scope it declares cannot be applied: ${(e as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Refuse an excluded path by saying so. A 404 would claim the file does not
+ * exist, when it does and was withheld on purpose - and a reviewer who reads
+ * that as a defect in the tool goes and opens the file by hand, which is the
+ * opposite of what the rules are for.
+ */
+function requireInScope(scope: ReviewScope, path: string): void {
+  if (!scope.inScope(path))
+    throw new HttpError(
+      403,
+      `${path} is excluded by scope: the review scope this repository declares in ${SCOPE_FILE} does not allow it`,
+    );
+}
+
 export interface ServerHandle {
   port: number;
   hosts: string[];
@@ -198,14 +303,41 @@ export async function startServer(
         return { ok: true };
       }
       const n = Number(url.searchParams.get("revision") ?? review.revision);
+      const scopeNow = await scopeOf(review);
       const data = review.revision
         ? await revisionData(id, n)
         : { document: null, map: null, changes: [], coverage: null, meta: null };
+      // Keyed on "a revision was published", not on "meta.json is there": that
+      // file is written last, so a revision left half-written by an interrupted
+      // publish has a document.json and no stamp, and a guard hung on the stamp
+      // would wave it through with the peeks the rules in force now withhold.
+      if (review.revision) requireRevisionUnderScope(data.meta, n, scopeNow);
       const threads = await readThreads(id);
+      // The sealed revision was filtered when it was published, so what is left
+      // to tell the reader is that something WAS withheld and by which rules.
+      // A shorter file list than the change really has, with nothing saying so,
+      // is worse for the reader than seeing all of it.
+      //
+      // The count comes from the revision, not from the pins: it has to describe
+      // the file list next to it. Counted live it would say "3 withheld" over a
+      // list sealed when one was, the moment the reviewer re-pinned to pick up
+      // new commits - and it would put a `git diff` on a page that is otherwise
+      // read entirely off disk, so a review whose repository has moved away
+      // answered 500 instead of serving what it had sealed.
+      const scope = scopeNow;
+      const withheld = sealedRules(data.meta).withheld;
       return {
         review,
         revision: n,
         ...data,
+        scope: {
+          declared: scope.declared,
+          verdict: scope.verdict,
+          extensions: scope.extensions,
+          filenames: scope.filenames,
+          exclude: scope.exclude,
+          withheld,
+        },
         threads: threads.threads,
         decisions: threads.decisions,
         agent: await presenceOf(id),
@@ -223,17 +355,34 @@ export async function startServer(
       return out.filter(Boolean) as unknown[];
     }
     if (sub === "changes") {
-      return await changedFiles(review.worktree, review.pins.base, review.pins.head);
+      const scope = await scopeOf(review);
+      return (await changedFiles(review.worktree, review.pins.base, review.pins.head)).filter((c) =>
+        changeInScope(scope, c),
+      );
     }
     if (sub === "commits") {
-      return await log(review.worktree, review.pins.base, review.pins.head);
+      // A path scope is about paths, so the per-commit file list is filtered and
+      // the message is not. Commit prose is content nobody thinks of as part of
+      // a review and no path rule touches it; README says so where it says what
+      // the scope does not cover.
+      const scope = await scopeOf(review);
+      return (await log(review.worktree, review.pins.base, review.pins.head)).map((c) => ({
+        ...c,
+        files: c.files.filter((f) => scope.inScope(f)),
+      }));
     }
     if (sub === "diff") {
       const path = url.searchParams.get("path") ?? "";
       if (!path) throw new HttpError(400, "path required");
+      const scope = await scopeOf(review);
+      requireInScope(scope, path);
       const changes = await changedFiles(review.worktree, review.pins.base, review.pins.head);
       const entry = changes.find((c) => c.path === path);
       const oldPath = entry?.oldPath ?? path;
+      // A rename out of an excluded directory into an allowed one would serve the
+      // excluded side as the diff's "before". Refuse and name the side that is
+      // withheld rather than silently render it as an addition.
+      requireInScope(scope, oldPath);
       const [oldText, newText] = await Promise.all([
         entry?.status === "A"
           ? Promise.resolve(null)
@@ -254,6 +403,7 @@ export async function startServer(
     if (sub === "file") {
       const path = url.searchParams.get("path") ?? "";
       const graph = url.searchParams.get("graph") === "base" ? "base" : "head";
+      requireInScope(await scopeOf(review), path);
       const commit = graph === "base" ? review.pins.base : review.pins.head;
       const text = await showFile(review.worktree, commit, path);
       if (text === null) throw new HttpError(404, `${path} not found at ${graph}`);
@@ -275,6 +425,7 @@ export async function startServer(
       const idx = symbolIndex(
         review.worktree,
         graph === "base" ? review.pins.base : review.pins.head,
+        await scopeOf(review),
       );
       return (await idx.lookup(name)).slice(0, 20);
     }
@@ -357,6 +508,7 @@ export async function startServer(
           const ext = path.split(".").pop()?.toLowerCase() ?? "";
           const type = BLOB_TYPES[ext];
           if (!path || !type) throw new HttpError(400, "path must name a font, image or css file");
+          requireInScope(await scopeOf(review), path);
           const text = await git(review.worktree, ["show", `${review.pins.head}:${path}`], {
             encoding: "buffer",
           });

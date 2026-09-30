@@ -13,6 +13,7 @@ import { listFiles, type LineChange } from "./git.js";
 import { languageFor } from "./highlight.js";
 import { catFiles } from "./symbols.js";
 import { readJson, writeJson } from "./store.js";
+import { OPEN_SCOPE, type ReviewScope } from "./scope.js";
 
 export interface Sym {
   /** `<file>:<name>`, with `#<line>` appended when the file defines the name twice. */
@@ -41,7 +42,7 @@ export interface Edge {
  * reads as zero - a wrong number rather than an error, which is exactly what a
  * document that states derived facts must never do.
  */
-export const GRAPH_SCHEMA = 3;
+export const GRAPH_SCHEMA = 4;
 
 export interface CodeGraph {
   schema: number;
@@ -55,6 +56,13 @@ export interface CodeGraph {
   unresolvedByFile: Record<string, number>;
   /** the file list was capped at MAX_FILES; the graph is incomplete */
   truncated: boolean;
+  /**
+   * Digest of the declared review scope this graph was built under (`open` when
+   * none was declared). A cache keyed only by commit would hand a narrowed scope
+   * the graph built before it, so the paths and symbol names it just excluded
+   * would keep being served from disk.
+   */
+  scope: string;
 }
 
 const MODULE = "<module>";
@@ -196,6 +204,14 @@ async function tagsOf(lang: string, text: string): Promise<Tag[]> {
   }
 }
 
+/**
+ * Build output, matched at ANY segment on purpose: a `node_modules` nested in a
+ * workspace package is still `node_modules`, and skipping it everywhere is what
+ * keeps the graph to code somebody wrote. This is the tool's own list, not a
+ * rule anybody typed - the positional form belongs to `exclude` in
+ * `thurview-scope.yaml` (see scope.ts), where "any segment named `test`" would
+ * silently drop a package whose own name ends in `test`.
+ */
 const SKIP = /(^|\/)(node_modules|dist|build|vendor|target|\.git)\//;
 
 /** Kinds that give their contents a name rather than hide them: a definition inside one is
@@ -227,9 +243,20 @@ export function capFiles(files: string[]): { files: string[]; truncated: boolean
     : { files, truncated: false };
 }
 
-/** Parse every supported file at `commit` and resolve references to definitions by name. */
-export async function buildGraph(cwd: string, commit: string): Promise<CodeGraph> {
-  const { files, truncated } = capFiles((await listFiles(cwd, commit)).filter(isGraphLanguage));
+/**
+ * Parse every supported file at `commit` and resolve references to definitions by
+ * name. `scope` is the review scope declared by the repository: a path it
+ * excludes is never parsed, so neither the path nor any name defined in it
+ * reaches the cached graph on disk.
+ */
+export async function buildGraph(
+  cwd: string,
+  commit: string,
+  scope: ReviewScope = OPEN_SCOPE,
+): Promise<CodeGraph> {
+  const { files, truncated } = capFiles(
+    (await listFiles(cwd, commit)).filter((f) => isGraphLanguage(f) && scope.inScope(f)),
+  );
   const symbols: Sym[] = [];
   const byName = new Map<string, Sym[]>();
   const pending: { file: string; defs: Sym[]; refs: Tag[] }[] = [];
@@ -328,15 +355,36 @@ export async function buildGraph(cwd: string, commit: string): Promise<CodeGraph
     unresolved,
     unresolvedByFile,
     truncated,
+    scope: scope.digest,
   };
 }
 
-/** Build the graph, or reuse the one cached under `dir` for that commit. */
-export async function graphAt(cwd: string, commit: string, dir: string): Promise<CodeGraph> {
-  const path = join(dir, "graph", `${commit}.json`);
+/**
+ * Build the graph, or reuse the one cached under `dir` for that commit AND that
+ * review scope. The scope is in the file name as well as checked in the record:
+ * two scopes over one commit are two different graphs, and keeping both means
+ * narrowing the rules and widening them again does not rebuild each time.
+ */
+export async function graphAt(
+  cwd: string,
+  commit: string,
+  dir: string,
+  scope: ReviewScope = OPEN_SCOPE,
+): Promise<CodeGraph> {
+  const path = join(
+    dir,
+    "graph",
+    scope.declared ? `${commit}.scope-${scope.digest}.json` : `${commit}.json`,
+  );
   const cached = await readJson<CodeGraph>(path);
-  if (cached && cached.commit === commit && cached.schema === GRAPH_SCHEMA) return cached;
-  const g = await buildGraph(cwd, commit);
+  if (
+    cached &&
+    cached.commit === commit &&
+    cached.schema === GRAPH_SCHEMA &&
+    cached.scope === scope.digest
+  )
+    return cached;
+  const g = await buildGraph(cwd, commit, scope);
   await writeJson(path, g);
   return g;
 }

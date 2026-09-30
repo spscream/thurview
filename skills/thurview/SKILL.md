@@ -81,6 +81,19 @@ conflict.
 
 `thurview scaffold` lists the ones it found under `guidance`.
 
+A repository may also declare a **review scope** in `thurview-scope.yaml` at its
+root: an allowlist of extensions, a list of whole file names, and directories
+or globs excluded from the first segment of the path (`*/test` is each top-level
+module's `test`, `**/test` one at any depth). It is not guidance - it is
+enforced. A peek at a path it withholds fails `publish`, as does a `theme.yaml`
+font inside one, and the reader's browser is refused the same path with
+"excluded by scope". A rename out of a withheld directory is withheld whole, so
+it will not be in the file list to anchor at all. When rules are declared the
+command prints them under `scopeRules`; read them before you pick what to
+anchor, and anchor nothing they withhold. Widening them is a change to the
+repository, so propose it in the document rather than editing it to fit the
+walkthrough.
+
 Read [Document authoring](references/document-authoring.md) before you write.
 Read [Components](references/components.md) before you edit `data.yaml` or add
 a fenced component. Read [Lifecycle](references/lifecycle.md) for statuses,

@@ -87,6 +87,15 @@ function intro(cov: Coverage): HTMLElement {
       cov.truncated
         ? fact("file list capped", "the graph is partial; treat every count as a floor")
         : null,
+      // Counted apart from the three states on purpose: "withheld by a rule" and
+      // "in scope and never examined" are different facts about the document, and
+      // folding them together would tell the reader it covers more than it does.
+      cov.files.excludedByScope
+        ? fact(
+            "withheld by the review scope",
+            `${cov.files.excludedByScope} file${cov.files.excludedByScope === 1 ? "" : "s"} at this commit, counted in none of the totals above`,
+          )
+        : null,
     ),
   );
 }

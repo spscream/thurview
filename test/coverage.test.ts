@@ -12,6 +12,7 @@ function graph(overrides: Partial<CodeGraph> = {}): CodeGraph {
     unresolved: 0,
     unresolvedByFile: {},
     truncated: false,
+    scope: "open",
     ...overrides,
   };
 }
