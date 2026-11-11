@@ -56,6 +56,16 @@ Only a summary posted by the account the CLI is logged in as counts, so a
 pasted marker changes nothing. A finding's id is the `id` given in the pass, or a hash of its category, path
 and title, which is how the same finding found on the next push is recognised.
 
+## The review page
+
+`THURVIEW_REVIEW_BASE`, unset by default, is the origin of a page that reads
+this review from the forge. When it is set and the forge is GitLab, the
+summary ends with `Discuss this review:` and that URL, and the
+`thurview/review` status links the page instead of the merge request. The
+URL is `{base}/{host}/{project}/-/merge_requests/{iid}`. GitHub ignores the
+variable. The summary is still the review. The page is not a second copy
+this command writes.
+
 ## Requiring the review
 
 Every `sync` sets a commit status named `thurview/review` on the head it
