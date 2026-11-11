@@ -204,6 +204,35 @@ describe("the summary", () => {
     expect(state.findings[0]).toMatchObject({ category: "bug", severity: "blocking", open: true });
   });
 
+  it("keeps another account's replies off this account's own messages", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    forge.threads[0]!.messages.push({
+      author: "dev",
+      body: "The 4xx path is intentional.",
+    });
+    const finding = (await readState(ctx(forge))).findings[0]!;
+    expect(finding.messages.map((m) => m.author)).toEqual(["bot"]);
+    expect(finding.replies).toEqual([
+      { author: "dev", body: "The 4xx path is intentional." },
+    ]);
+  });
+
+  it("lists other people's notes as remarks and leaves a stop command out", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 4 });
+    forge.notesList.push(
+      { id: "200", author: "dev", body: "Why is the score 4?" },
+      { id: "201", author: "dev", body: "/thurview stop" },
+      { id: "202", author: "bot", body: "I will look." },
+    );
+    const st = await readState(ctx(forge));
+    expect(st.remarks).toEqual([
+      { id: "200", author: "dev", body: "Why is the score 4?" },
+    ]);
+    expect(st.stop).toMatch(/\/thurview stop/);
+  });
+
   it("lists each open finding with its category and severity", async () => {
     const forge = new MemoryForge();
     await pass(forge, {

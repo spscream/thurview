@@ -72,6 +72,8 @@ export interface FindingState {
   thread: string;
   url?: string;
   messages: { author: string; body: string }[];
+  /** What other people wrote on this finding. Untrusted. Own messages stay in `messages`. */
+  replies: { author: string; body: string }[];
   commit?: string;
 }
 
@@ -93,6 +95,8 @@ export interface ReviewState {
   others: OtherThread[];
   /** Why the reader asked to stop, when they did and the summary does not say so yet. */
   stop: string | null;
+  /** Top-level notes by other people, apart from a stop command. Untrusted. */
+  remarks: { id: string; author: string; body: string }[];
   /** The newest note id on the change request. */
   newest: string;
 }
@@ -177,6 +181,8 @@ export async function readState(ctx: Ctx): Promise<ReviewState> {
       });
     const m = t.author === me ? readFindingMarker(t.messages[0]?.body ?? "") : null;
     if (!m) continue;
+    const own = t.messages.filter((m) => m.author === me);
+    const replies = t.messages.filter((m) => m.author !== me);
     findings.push({
       id: m.id,
       category: m.category,
@@ -187,7 +193,8 @@ export async function readState(ctx: Ctx): Promise<ReviewState> {
       open: !t.resolved,
       thread: t.id,
       ...(t.url ? { url: t.url } : {}),
-      messages: t.messages.filter((m) => m.author === me),
+      messages: own,
+      replies,
       ...(t.commit ? { commit: t.commit } : {}),
     });
   }
@@ -200,7 +207,17 @@ export async function readState(ctx: Ctx): Promise<ReviewState> {
     : command
       ? `a /thurview stop comment by @${command.author}`
       : null;
-  return { summary, findings, others, stop, newest: maxId(...notes.map((n) => n.id)) };
+  const remarks = notes.filter(
+    (n) => n.author !== me && n !== summary?.note && !STOP_COMMAND.test(n.body),
+  );
+  return {
+    summary,
+    findings,
+    others,
+    remarks,
+    stop,
+    newest: maxId(...notes.map((n) => n.id)),
+  };
 }
 
 /**
