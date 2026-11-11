@@ -215,9 +215,7 @@ describe("the summary", () => {
     });
     const finding = (await readState(ctx(forge))).findings[0]!;
     expect(finding.messages.map((m) => m.author)).toEqual(["bot"]);
-    expect(finding.replies).toEqual([
-      { author: "dev", body: "The 4xx path is intentional." },
-    ]);
+    expect(finding.replies).toEqual([{ author: "dev", body: "The 4xx path is intentional." }]);
   });
 
   it("lists other people's notes as remarks and leaves a stop command out", async () => {
@@ -229,9 +227,7 @@ describe("the summary", () => {
       { id: "202", author: "bot", body: "I will look." },
     );
     const st = await readState(ctx(forge));
-    expect(st.remarks).toEqual([
-      { id: "200", author: "dev", body: "Why is the score 4?" },
-    ]);
+    expect(st.remarks).toEqual([{ id: "200", author: "dev", body: "Why is the score 4?" }]);
     expect(st.stop).toMatch(/\/thurview stop/);
   });
 
@@ -316,12 +312,26 @@ describe("the summary", () => {
 
   it("links a GitLab review page without spending the word budget", () => {
     const head = { head: SHA(1), state: "active" as const, seen: "0" };
-    const page =
-      "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7";
-    const body = renderSummary({ ...base }, head, "dev", [], undefined, page);
+    const page = "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7";
+    const prose = (n: number) => Array.from({ length: n }, () => "word").join(" ");
+    const authored = (change: string) =>
+      summaryWords([base.reason, base.architecture, "", change, ...base.risk, ""].join(" "));
+    const atCap = { ...base, change: prose(SUMMARY_WORDS - authored("")) };
+    expect(authored(atCap.change)).toBe(SUMMARY_WORDS);
+    const body = renderSummary(atCap, head, "dev", [], undefined, page);
     expect(body).toContain(`Discuss this review: ${page}`);
     const stopped = restate(body, { ...head, state: "stopped" }, "Review stopped.");
     expect(stopped).toContain(`Discuss this review: ${page}`);
+    expect(() =>
+      renderSummary(
+        { ...atCap, change: `${atCap.change} ${page}` },
+        head,
+        "dev",
+        [],
+        undefined,
+        page,
+      ),
+    ).toThrow(/words/);
   });
 
   it("builds the review page only for GitLab", () => {
