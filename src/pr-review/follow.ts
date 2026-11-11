@@ -479,19 +479,20 @@ export async function sync(
       ["Leave pass.replies empty; the summary is the last word on an ended change request"],
     );
   const seenHashes = new Set<string>();
-  const replying: { thread: string }[] = [];
+  const planned: { thread: string; body: string }[] = [];
   for (const reply of replies) {
     const finding = st.findings.find((f) => f.thread === reply.thread);
     if (!finding)
       throw new AxiError(`no own finding thread ${reply.thread}`, "NOT_FOUND", [
         "pass.replies names a thread from status reassess",
       ]);
-    const marker = replyMarker(reply.thread, reply.body);
-    if (seenHashes.has(marker) || finding.messages.some((m) => m.body.startsWith(marker)))
+    const tagged = replyMarker(reply.thread, reply.body);
+    if (seenHashes.has(tagged) || finding.messages.some((m) => m.body.startsWith(tagged)))
       continue;
-    seenHashes.add(marker);
-    replying.push({ thread: reply.thread });
+    seenHashes.add(tagged);
+    planned.push({ thread: reply.thread, body: reply.body });
   }
+  const replying = planned.map(({ thread }) => ({ thread }));
   const result: SyncResult = {
     summary: opts.dryRun ? "dry-run" : st.summary ? "edited" : "created",
     head: reviewed,
@@ -545,13 +546,12 @@ export async function sync(
       assessment.status === "fixed" && f.open,
     );
   }
-  for (const item of replying) {
-    const reply = replies.find((r) => r.thread === item.thread)!;
+  for (const item of planned) {
     await forge.reply(
       repo,
       cr,
       item.thread,
-      `${replyMarker(item.thread, reply.body)}\n${reply.body.trim()}`,
+      `${replyMarker(item.thread, item.body)}\n${item.body.trim()}`,
       false,
     );
   }

@@ -1130,6 +1130,41 @@ describe("reader replies on finding threads", () => {
     expect(forge.threads[0]!.messages).toHaveLength(1);
   });
 
+  it("posts each distinct body on one thread in one pass", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const result = await pass(forge, {
+      confidence: 2,
+      replies: [
+        { thread, body: "The 4xx path is the contract." },
+        { thread, body: "We will not retry on 4xx." },
+      ],
+    });
+    const bodies = forge.threads[0]!.messages.map((m) => m.body);
+    expect(forge.threads[0]!.resolved).toBe(false);
+    expect(bodies.some((b) => b.includes("The 4xx path is the contract."))).toBe(true);
+    expect(bodies.some((b) => b.includes("We will not retry on 4xx."))).toBe(true);
+    expect(result.replying).toEqual([{ thread }, { thread }]);
+  });
+
+  it("posts only new bodies when an earlier note is already on the thread", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const first = { thread, body: "The 4xx path is the contract." };
+    const second = { thread, body: "We will not retry on 4xx." };
+    await pass(forge, { confidence: 2, replies: [first] });
+    const afterFirst = forge.threads[0]!.messages.length;
+    const result = await pass(forge, { confidence: 2, replies: [first, second] });
+    expect(forge.threads[0]!.messages).toHaveLength(afterFirst + 1);
+    expect(forge.threads[0]!.messages.at(-1)!.body).toContain("We will not retry on 4xx.");
+    expect(result.replying).toEqual([{ thread }]);
+    const retry = await pass(forge, { confidence: 2, replies: [first, second] });
+    expect(forge.threads[0]!.messages).toHaveLength(afterFirst + 1);
+    expect(retry.replying).toEqual([]);
+  });
+
   it("dry-run posts no reader reply", async () => {
     const forge = new MemoryForge();
     await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
