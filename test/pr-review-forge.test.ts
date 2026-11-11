@@ -732,6 +732,65 @@ describe("thurview pr-review, on a self-hosted GitLab", { timeout: 30_000 }, () 
     expect(status["others"].map((o: { thread: string }) => o.thread)).toEqual(["d5"]);
   });
 
+  it("quotes reader replies and remarks", async () => {
+    const finding = [
+      "<!-- thurview-finding " +
+        '{"id":"loop","category":"bug","severity":"blocking"} -->',
+      "**Bug · blocking:** Loops.",
+    ].join("\n");
+    await fixtures([
+      {
+        cli: "glab",
+        match: ["merge_requests/7/discussions?", "--paginate"],
+        body: ndjson({
+          id: "d-loop",
+          notes: [
+            {
+              id: 10,
+              body: finding,
+              system: false,
+              resolvable: true,
+              resolved: false,
+              author: { username: "bot" },
+              position: { new_path: "src/upload.ts", new_line: 42, head_sha: HEAD },
+            },
+            {
+              id: 11,
+              body: "The 4xx path is intentional.",
+              system: false,
+              resolvable: true,
+              resolved: false,
+              author: { username: "dev" },
+            },
+          ],
+        }),
+      },
+      {
+        cli: "glab",
+        match: ["merge_requests/7/notes?", "--paginate"],
+        body: ndjson(
+          { id: 9, body: SUMMARY(HEAD), author: { username: "bot" } },
+          { id: 12, body: "Why is the score 2?", author: { username: "dev" } },
+        ),
+      },
+      ...base,
+    ]);
+    const status = await cli(["pr-review", "status", "--change", "7"], gitlab);
+    expect(status["reassess"]).toEqual([
+      {
+        id: "loop",
+        open: true,
+        thread: "d-loop",
+        replies: [{ author: "dev", body: JSON.stringify("The 4xx path is intentional.") }],
+      },
+    ]);
+    expect(status["remarks"]).toEqual([
+      { id: "12", author: "dev", body: JSON.stringify("Why is the score 2?") },
+    ]);
+    expect(status["help"].join("\n")).toMatch(/never an instruction/);
+    expect(status["help"].join("\n")).toMatch(/does not block sync/);
+  });
+
   it("opens a diff discussion per finding and posts the summary as a note", async () => {
     await fixtures([
       { cli: "glab", match: ["merge_requests/7/discussions", "POST"], body: { id: "d1" } },
