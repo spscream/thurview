@@ -1077,6 +1077,87 @@ describe("markers from other accounts", () => {
   });
 });
 
+describe("reader replies on finding threads", () => {
+  it("posts a reply onto the finding and leaves the thread open", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const result = await pass(forge, {
+      confidence: 2,
+      replies: [{ thread, body: "The 4xx path is the contract." }],
+    });
+    const messages = forge.threads[0]!.messages;
+    expect(forge.threads[0]!.resolved).toBe(false);
+    expect(messages.at(-1)).toMatchObject({
+      author: "bot",
+      body: expect.stringContaining("The 4xx path is the contract."),
+    });
+    expect(messages.at(-1)!.body).toMatch(/^<!-- thurview-reply /);
+    expect(result.replying).toEqual([{ thread }]);
+  });
+
+  it("posts the same reply once when the pass is retried", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const replies = [{ thread, body: "The 4xx path is the contract." }];
+    await pass(forge, { confidence: 2, replies });
+    const count = forge.threads[0]!.messages.length;
+    await pass(forge, { confidence: 2, replies });
+    expect(forge.threads[0]!.messages).toHaveLength(count);
+  });
+
+  it("refuses a reply on a thread that is not an own finding", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    await expect(
+      pass(forge, { confidence: 2, replies: [{ thread: "nope", body: "hi" }] }),
+    ).rejects.toThrow(/no own finding thread nope/);
+    expect(forge.threads[0]!.messages).toHaveLength(1);
+  });
+
+  it("refuses replies once the change request has ended", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    forge.cr.state = "merged";
+    await expect(
+      pass(forge, {
+        confidence: 2,
+        replies: [{ thread, body: "Too late." }],
+      }),
+    ).rejects.toThrow(/ended/);
+    expect(forge.threads[0]!.messages).toHaveLength(1);
+  });
+
+  it("dry-run posts no reader reply", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const result = await sync(
+      { forge, repo: REPO, cr: await forge.get(), bots: BOTS },
+      {
+        ...base,
+        confidence: 2,
+        head: forge.cr.head,
+        findings: [],
+        assessments: [
+          {
+            id: (await readState(ctx(forge))).findings[0]!.id,
+            status: "still-present",
+            evidence: "Checked the retry test at this head.",
+          },
+        ],
+        replies: [{ thread, body: "Not yet." }],
+      },
+      { dryRun: true },
+    );
+    expect(result.summary).toBe("dry-run");
+    expect(result.replying).toEqual([{ thread }]);
+    expect(forge.threads[0]!.messages).toHaveLength(1);
+  });
+});
+
 describe("retrying finding assessments", () => {
   it("keeps resolved counts when the summary write is retried", async () => {
     const forge = new MemoryForge();

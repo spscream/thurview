@@ -359,6 +359,7 @@ const commands: Record<string, (args: string[]) => Promise<Out>> = {
         },
         posted: r.posted.length ? r.posted : "0 (no new finding)",
         resolved: r.resolved.length ? r.resolved : "0 (no finding fixed)",
+        ...(r.replying.length ? { replied: r.replying } : {}),
         sinceLastReview: r.sinceLastReview,
         duplicates: r.duplicates.length
           ? r.duplicates

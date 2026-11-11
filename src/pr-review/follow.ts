@@ -9,6 +9,7 @@ import {
   readSummaryMarker,
   renderFinding,
   renderSummary,
+  replyMarker,
   restate,
   statusLine,
   type Finding,
@@ -241,6 +242,7 @@ export interface SyncResult {
   head: string;
   posted: { id: string; at: string }[];
   resolved: string[];
+  replying: { thread: string }[];
   duplicates: string[];
   open: number;
   blocking: number;
@@ -469,11 +471,33 @@ export async function sync(
     ...(ended ? { ended } : {}),
   };
   const body = renderSummary(pass, marker, cr.author, open, update);
+  const replies = pass.replies ?? [];
+  if (ended && replies.length)
+    throw new AxiError(
+      "the change request has ended; a reply would not be a review of its head",
+      "CONFLICT",
+      ["Leave pass.replies empty; the summary is the last word on an ended change request"],
+    );
+  const seenHashes = new Set<string>();
+  const replying: { thread: string }[] = [];
+  for (const reply of replies) {
+    const finding = st.findings.find((f) => f.thread === reply.thread);
+    if (!finding)
+      throw new AxiError(`no own finding thread ${reply.thread}`, "NOT_FOUND", [
+        "pass.replies names a thread from status reassess",
+      ]);
+    const marker = replyMarker(reply.thread, reply.body);
+    if (seenHashes.has(marker) || finding.messages.some((m) => m.body.startsWith(marker)))
+      continue;
+    seenHashes.add(marker);
+    replying.push({ thread: reply.thread });
+  }
   const result: SyncResult = {
     summary: opts.dryRun ? "dry-run" : st.summary ? "edited" : "created",
     head: reviewed,
     posted: ended ? [] : fresh.map(({ id, f }) => ({ id, at: `${f.path}:${f.line}` })),
     resolved: ended ? [] : fixed,
+    replying,
     duplicates,
     open: open.length,
     blocking,
@@ -519,6 +543,16 @@ export async function sync(
       f.thread,
       replied ? undefined : reply,
       assessment.status === "fixed" && f.open,
+    );
+  }
+  for (const item of replying) {
+    const reply = replies.find((r) => r.thread === item.thread)!;
+    await forge.reply(
+      repo,
+      cr,
+      item.thread,
+      `${replyMarker(item.thread, reply.body)}\n${reply.body.trim()}`,
+      false,
     );
   }
   result.body = renderSummary(pass, marker, cr.author, open, update);

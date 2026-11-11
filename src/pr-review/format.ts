@@ -95,6 +95,14 @@ const PassSchema = z.object({
   fixed: z.array(z.string()).default([]),
   /** A disposition for every other reviewer's open thread. */
   others: z.array(Other).default([]),
+  replies: z
+    .array(
+      z.object({
+        thread: z.string().min(1),
+        body: z.string().trim().min(1),
+      }),
+    )
+    .default([]),
   assessments: z
     .array(
       z.object({
@@ -188,6 +196,11 @@ export function findingId(f: Finding): string {
   if (f.id) return f.id;
   const h = createHash("sha1").update(`${f.category}\n${f.path}\n${f.title.trim()}`);
   return h.digest("hex").slice(0, 10);
+}
+
+export function replyMarker(thread: string, body: string): string {
+  const hash = createHash("sha1").update(`${thread}\n${body.trim()}`).digest("hex").slice(0, 10);
+  return `<!-- thurview-reply ${JSON.stringify({ hash })} -->`;
 }
 
 function marker(tag: string, data: object): string {
