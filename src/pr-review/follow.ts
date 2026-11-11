@@ -55,6 +55,18 @@ export interface Ctx {
   cr: ChangeRequest;
   /** Review bots whose threads count, from `reviewers.json`: exact logins, trusted only on a bot account. */
   bots?: string[];
+  reviewBase?: string;
+}
+
+export function reviewPage(
+  forgeId: string,
+  base: string | undefined,
+  repo: RepoId,
+  number: string,
+): string | undefined {
+  if (forgeId !== "gitlab" || !base?.trim()) return undefined;
+  const root = base.trim().replace(/\/+$/, "");
+  return `${root}/${repo.host}/${repo.path}/-/merge_requests/${number}`;
 }
 
 export const STOP_LABEL = "thurview:stop";
@@ -470,7 +482,8 @@ export async function sync(
     reviewedAt: new Date().toISOString(),
     ...(ended ? { ended } : {}),
   };
-  const body = renderSummary(pass, marker, cr.author, open, update);
+  const page = reviewPage(forge.id, ctx.reviewBase, repo, cr.number);
+  const body = renderSummary(pass, marker, cr.author, open, update, page);
   const replies = pass.replies ?? [];
   if (ended && replies.length)
     throw new AxiError(
@@ -515,7 +528,7 @@ export async function sync(
   if (ended) {
     if (st.summary) await forge.editNote(repo, cr, st.summary.note.id, body);
     else await forge.postNote(repo, cr, body);
-    await setReviewStatus(ctx, reviewed, pass, open);
+    await setReviewStatus(ctx, reviewed, pass, open, page);
     return result;
   }
   for (const { id, f } of fresh) {
@@ -555,10 +568,10 @@ export async function sync(
       false,
     );
   }
-  result.body = renderSummary(pass, marker, cr.author, open, update);
+  result.body = renderSummary(pass, marker, cr.author, open, update, page);
   if (st.summary) await forge.editNote(repo, cr, st.summary.note.id, result.body);
   else await forge.postNote(repo, cr, result.body);
-  await setReviewStatus(ctx, reviewed, pass, open);
+  await setReviewStatus(ctx, reviewed, pass, open, page);
   return result;
 }
 
@@ -567,7 +580,13 @@ export async function sync(
  * success only at 5 with nothing open. A push leaves the new head without one
  * until a pass reviews it, so a branch rule requiring it holds every head.
  */
-async function setReviewStatus(ctx: Ctx, sha: string, pass: Pass, open: OpenFinding[]) {
+async function setReviewStatus(
+  ctx: Ctx,
+  sha: string,
+  pass: Pass,
+  open: OpenFinding[],
+  page?: string,
+) {
   const blocking = open.filter((f) => f.severity === "blocking").length;
   const clean = pass.confidence === 5 && !open.length;
   const counts = open.length
@@ -577,7 +596,7 @@ async function setReviewStatus(ctx: Ctx, sha: string, pass: Pass, open: OpenFind
     context: REVIEW_STATUS,
     state: clean ? "success" : "failure",
     description: `Confidence ${pass.confidence}/5 · ${counts}`,
-    url: ctx.cr.url,
+    url: page ?? ctx.cr.url,
   });
 }
 

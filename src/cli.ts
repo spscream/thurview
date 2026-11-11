@@ -40,6 +40,7 @@ interface ForgeCtx {
   cr: ChangeRequest;
   /** Review bots whose threads `pr-review` counts. */
   bots: string[];
+  reviewBase?: string;
 }
 
 /** Which change request `--change` names, on which forge, read once. */
@@ -55,7 +56,13 @@ async function forgeContext(p: Parsed): Promise<ForgeCtx> {
     ]);
   const repo = await repoOf(worktree ?? process.cwd(), repoFlag);
   const forge = await forgeFor(repo.host, str(p, "forge"));
-  return { forge, repo, cr: await forge.get(repo, ref), bots: await reviewBots() };
+  return {
+    forge,
+    repo,
+    cr: await forge.get(repo, ref),
+    bots: await reviewBots(),
+    reviewBase: process.env["THURVIEW_REVIEW_BASE"],
+  };
 }
 
 /** Review bots whose threads `pr-review` counts, from `$THURVIEW_HOME/reviewers.json`. */

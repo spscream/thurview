@@ -390,6 +390,7 @@ export function renderSummary(
   author: string,
   open: OpenFinding[],
   update?: SummaryUpdate,
+  pageUrl?: string,
 ): string {
   // Count the inputs, not rendered lines: a pipe or HTML cannot hide prose from the budget.
   const words = summaryWords(
@@ -431,6 +432,7 @@ export function renderSummary(
   );
   parts.push(`Reviewed ${code(m.head.slice(0, 7))}${update ? ` · ${update.reviewedAt}` : ""}`);
   if (p.signoff) parts.push(p.signoff.trim());
+  if (pageUrl) parts.push(`Discuss this review: ${pageUrl}`);
   return parts.join("\n\n");
 }
 

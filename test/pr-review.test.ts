@@ -13,6 +13,7 @@ import { CATEGORIES, SEVERITIES, CONFIDENCE } from "../src/pr-review/categories.
 import {
   parsePass,
   renderSummary,
+  restate,
   summaryWords,
   SUMMARY_WORDS,
   type Pass,
@@ -23,6 +24,7 @@ import {
   waitForEvent,
   stopReview,
   startReview,
+  reviewPage,
   type ReviewForge,
 } from "../src/pr-review/follow.js";
 
@@ -310,6 +312,25 @@ describe("the summary", () => {
     expect(() => renderSummary({ ...base, change: words(SUMMARY_WORDS) }, head, "dev", [])).toThrow(
       /words/,
     );
+  });
+
+  it("links a GitLab review page without spending the word budget", () => {
+    const head = { head: SHA(1), state: "active" as const, seen: "0" };
+    const page =
+      "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7";
+    const body = renderSummary({ ...base }, head, "dev", [], undefined, page);
+    expect(body).toContain(`Discuss this review: ${page}`);
+    const stopped = restate(body, { ...head, state: "stopped" }, "Review stopped.");
+    expect(stopped).toContain(`Discuss this review: ${page}`);
+  });
+
+  it("builds the review page only for GitLab", () => {
+    const repo = { host: "gitlab.example.com", path: "acme/web" };
+    expect(reviewPage("gitlab", "https://reviews.example.com/", repo, "7")).toBe(
+      "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7",
+    );
+    expect(reviewPage("github", "https://reviews.example.com", repo, "7")).toBeUndefined();
+    expect(reviewPage("gitlab", "  ", repo, "7")).toBeUndefined();
   });
 
   it("refuses a high confidence beside an open blocking finding", async () => {
