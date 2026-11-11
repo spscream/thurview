@@ -13,6 +13,7 @@ import { CATEGORIES, SEVERITIES, CONFIDENCE } from "../src/pr-review/categories.
 import {
   parsePass,
   renderSummary,
+  restate,
   summaryWords,
   SUMMARY_WORDS,
   type Pass,
@@ -23,6 +24,7 @@ import {
   waitForEvent,
   stopReview,
   startReview,
+  reviewPage,
   type ReviewForge,
 } from "../src/pr-review/follow.js";
 
@@ -204,6 +206,31 @@ describe("the summary", () => {
     expect(state.findings[0]).toMatchObject({ category: "bug", severity: "blocking", open: true });
   });
 
+  it("keeps another account's replies off this account's own messages", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    forge.threads[0]!.messages.push({
+      author: "dev",
+      body: "The 4xx path is intentional.",
+    });
+    const finding = (await readState(ctx(forge))).findings[0]!;
+    expect(finding.messages.map((m) => m.author)).toEqual(["bot"]);
+    expect(finding.replies).toEqual([{ author: "dev", body: "The 4xx path is intentional." }]);
+  });
+
+  it("lists other people's notes as remarks and leaves a stop command out", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 4 });
+    forge.notesList.push(
+      { id: "200", author: "dev", body: "Why is the score 4?" },
+      { id: "201", author: "dev", body: "/thurview stop" },
+      { id: "202", author: "bot", body: "I will look." },
+    );
+    const st = await readState(ctx(forge));
+    expect(st.remarks).toEqual([{ id: "200", author: "dev", body: "Why is the score 4?" }]);
+    expect(st.stop).toMatch(/\/thurview stop/);
+  });
+
   it("lists each open finding with its category and severity", async () => {
     const forge = new MemoryForge();
     await pass(forge, {
@@ -281,6 +308,39 @@ describe("the summary", () => {
     expect(() => renderSummary({ ...base, change: words(SUMMARY_WORDS) }, head, "dev", [])).toThrow(
       /words/,
     );
+  });
+
+  it("links a GitLab review page without spending the word budget", () => {
+    const head = { head: SHA(1), state: "active" as const, seen: "0" };
+    const page = "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7";
+    const prose = (n: number) => Array.from({ length: n }, () => "word").join(" ");
+    const authored = (change: string) =>
+      summaryWords([base.reason, base.architecture, "", change, ...base.risk, ""].join(" "));
+    const atCap = { ...base, change: prose(SUMMARY_WORDS - authored("")) };
+    expect(authored(atCap.change)).toBe(SUMMARY_WORDS);
+    const body = renderSummary(atCap, head, "dev", [], undefined, page);
+    expect(body).toContain(`Discuss this review: ${page}`);
+    const stopped = restate(body, { ...head, state: "stopped" }, "Review stopped.");
+    expect(stopped).toContain(`Discuss this review: ${page}`);
+    expect(() =>
+      renderSummary(
+        { ...atCap, change: `${atCap.change} ${page}` },
+        head,
+        "dev",
+        [],
+        undefined,
+        page,
+      ),
+    ).toThrow(/words/);
+  });
+
+  it("builds the review page only for GitLab", () => {
+    const repo = { host: "gitlab.example.com", path: "acme/web" };
+    expect(reviewPage("gitlab", "https://reviews.example.com/", repo, "7")).toBe(
+      "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7",
+    );
+    expect(reviewPage("github", "https://reviews.example.com", repo, "7")).toBeUndefined();
+    expect(reviewPage("gitlab", "  ", repo, "7")).toBeUndefined();
   });
 
   it("refuses a high confidence beside an open blocking finding", async () => {
@@ -1045,6 +1105,122 @@ describe("markers from other accounts", () => {
     const forge = new MemoryForge();
     await pass(forge, { signoff: "— the agent\n" });
     await expect(pass(forge, { reason: "x\r| " + "word ".repeat(300) })).rejects.toThrow(/reason/);
+  });
+});
+
+describe("reader replies on finding threads", () => {
+  it("posts a reply onto the finding and leaves the thread open", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const result = await pass(forge, {
+      confidence: 2,
+      replies: [{ thread, body: "The 4xx path is the contract." }],
+    });
+    const messages = forge.threads[0]!.messages;
+    expect(forge.threads[0]!.resolved).toBe(false);
+    expect(messages.at(-1)).toMatchObject({
+      author: "bot",
+      body: expect.stringContaining("The 4xx path is the contract."),
+    });
+    expect(messages.at(-1)!.body).toMatch(/^<!-- thurview-reply /);
+    expect(result.replying).toEqual([{ thread }]);
+  });
+
+  it("posts the same reply once when the pass is retried", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const replies = [{ thread, body: "The 4xx path is the contract." }];
+    await pass(forge, { confidence: 2, replies });
+    const count = forge.threads[0]!.messages.length;
+    await pass(forge, { confidence: 2, replies });
+    expect(forge.threads[0]!.messages).toHaveLength(count);
+  });
+
+  it("refuses a reply on a thread that is not an own finding", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    await expect(
+      pass(forge, { confidence: 2, replies: [{ thread: "nope", body: "hi" }] }),
+    ).rejects.toThrow(/no own finding thread nope/);
+    expect(forge.threads[0]!.messages).toHaveLength(1);
+  });
+
+  it("refuses replies once the change request has ended", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    forge.cr.state = "merged";
+    await expect(
+      pass(forge, {
+        confidence: 2,
+        replies: [{ thread, body: "Too late." }],
+      }),
+    ).rejects.toThrow(/ended/);
+    expect(forge.threads[0]!.messages).toHaveLength(1);
+  });
+
+  it("posts each distinct body on one thread in one pass", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const result = await pass(forge, {
+      confidence: 2,
+      replies: [
+        { thread, body: "The 4xx path is the contract." },
+        { thread, body: "We will not retry on 4xx." },
+      ],
+    });
+    const bodies = forge.threads[0]!.messages.map((m) => m.body);
+    expect(forge.threads[0]!.resolved).toBe(false);
+    expect(bodies.some((b) => b.includes("The 4xx path is the contract."))).toBe(true);
+    expect(bodies.some((b) => b.includes("We will not retry on 4xx."))).toBe(true);
+    expect(result.replying).toEqual([{ thread }, { thread }]);
+  });
+
+  it("posts only new bodies when an earlier note is already on the thread", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const first = { thread, body: "The 4xx path is the contract." };
+    const second = { thread, body: "We will not retry on 4xx." };
+    await pass(forge, { confidence: 2, replies: [first] });
+    const afterFirst = forge.threads[0]!.messages.length;
+    const result = await pass(forge, { confidence: 2, replies: [first, second] });
+    expect(forge.threads[0]!.messages).toHaveLength(afterFirst + 1);
+    expect(forge.threads[0]!.messages.at(-1)!.body).toContain("We will not retry on 4xx.");
+    expect(result.replying).toEqual([{ thread }]);
+    const retry = await pass(forge, { confidence: 2, replies: [first, second] });
+    expect(forge.threads[0]!.messages).toHaveLength(afterFirst + 1);
+    expect(retry.replying).toEqual([]);
+  });
+
+  it("dry-run posts no reader reply", async () => {
+    const forge = new MemoryForge();
+    await pass(forge, { confidence: 2, findings: [UNBOUNDED] });
+    const thread = forge.threads[0]!.id;
+    const result = await sync(
+      { forge, repo: REPO, cr: await forge.get(), bots: BOTS },
+      {
+        ...base,
+        confidence: 2,
+        head: forge.cr.head,
+        findings: [],
+        assessments: [
+          {
+            id: (await readState(ctx(forge))).findings[0]!.id,
+            status: "still-present",
+            evidence: "Checked the retry test at this head.",
+          },
+        ],
+        replies: [{ thread, body: "Not yet." }],
+      },
+      { dryRun: true },
+    );
+    expect(result.summary).toBe("dry-run");
+    expect(result.replying).toEqual([{ thread }]);
+    expect(forge.threads[0]!.messages).toHaveLength(1);
   });
 });
 

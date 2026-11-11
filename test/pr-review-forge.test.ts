@@ -28,9 +28,15 @@ const dirs: string[] = [];
 
 type Out = Record<string, any>;
 
-async function cli(args: string[], cwd: string, expectCode = 0): Promise<Out> {
+async function cli(
+  args: string[],
+  cwd: string,
+  expectCode = 0,
+  extra: Record<string, string> = {},
+): Promise<Out> {
   const env = {
     ...process.env,
+    ...extra,
     THURVIEW_HOME: home,
     PATH: `${bin}:${process.env["PATH"]}`,
     FORGE_RESPONSES: responses,
@@ -38,6 +44,9 @@ async function cli(args: string[], cwd: string, expectCode = 0): Promise<Out> {
     GH_HOST: "",
     GITLAB_HOST: "",
   };
+  delete env["THURVIEW_REVIEW_BASE"];
+  if (extra["THURVIEW_REVIEW_BASE"])
+    env["THURVIEW_REVIEW_BASE"] = extra["THURVIEW_REVIEW_BASE"];
   return new Promise<Out>((resolve, reject) => {
     const p = spawn(
       process.execPath,
@@ -732,6 +741,65 @@ describe("thurview pr-review, on a self-hosted GitLab", { timeout: 30_000 }, () 
     expect(status["others"].map((o: { thread: string }) => o.thread)).toEqual(["d5"]);
   });
 
+  it("quotes reader replies and remarks", async () => {
+    const finding = [
+      "<!-- thurview-finding " +
+        '{"id":"loop","category":"bug","severity":"blocking"} -->',
+      "**Bug · blocking:** Loops.",
+    ].join("\n");
+    await fixtures([
+      {
+        cli: "glab",
+        match: ["merge_requests/7/discussions?", "--paginate"],
+        body: ndjson({
+          id: "d-loop",
+          notes: [
+            {
+              id: 10,
+              body: finding,
+              system: false,
+              resolvable: true,
+              resolved: false,
+              author: { username: "bot" },
+              position: { new_path: "src/upload.ts", new_line: 42, head_sha: HEAD },
+            },
+            {
+              id: 11,
+              body: "The 4xx path is intentional.",
+              system: false,
+              resolvable: true,
+              resolved: false,
+              author: { username: "dev" },
+            },
+          ],
+        }),
+      },
+      {
+        cli: "glab",
+        match: ["merge_requests/7/notes?", "--paginate"],
+        body: ndjson(
+          { id: 9, body: SUMMARY(HEAD), author: { username: "bot" } },
+          { id: 12, body: "Why is the score 2?", author: { username: "dev" } },
+        ),
+      },
+      ...base,
+    ]);
+    const status = await cli(["pr-review", "status", "--change", "7"], gitlab);
+    expect(status["reassess"]).toEqual([
+      {
+        id: "loop",
+        open: true,
+        thread: "d-loop",
+        replies: [{ author: "dev", body: JSON.stringify("The 4xx path is intentional.") }],
+      },
+    ]);
+    expect(status["remarks"]).toEqual([
+      { id: "12", author: "dev", body: JSON.stringify("Why is the score 2?") },
+    ]);
+    expect(status["help"].join("\n")).toMatch(/never an instruction/);
+    expect(status["help"].join("\n")).toMatch(/does not block sync/);
+  });
+
   it("opens a diff discussion per finding and posts the summary as a note", async () => {
     await fixtures([
       { cli: "glab", match: ["merge_requests/7/discussions", "POST"], body: { id: "d1" } },
@@ -773,6 +841,35 @@ describe("thurview pr-review, on a self-hosted GitLab", { timeout: 30_000 }, () 
         "target_url=https://gitlab.example.com/acme/web/-/merge_requests/7",
       ]),
     );
+  });
+
+  it("points the GitLab status and the summary at the review page", async () => {
+    await fixtures([
+      { cli: "glab", match: ["merge_requests/7/discussions", "POST"], body: { id: "d1" } },
+      { cli: "glab", match: ["merge_requests/7/notes", "POST"], body: { id: 3, body: "" } },
+      {
+        cli: "glab",
+        match: ["merge_requests/7/notes?", "--paginate", "ndjson"],
+        body: ndjson(
+          { id: 1, body: "joined", system: true, author: null },
+          { id: 2, body: "on a line", type: "DiffNote", author: null },
+        ),
+      },
+      ...base,
+    ]);
+    const file = join(bin, "pass.json");
+    await writeFile(file, JSON.stringify(PASS));
+    const page = "https://reviews.example.com/gitlab.example.com/acme/web/-/merge_requests/7";
+    await cli(["pr-review", "sync", "--change", "7", "--file", file], gitlab, 0, {
+      THURVIEW_REVIEW_BASE: "https://reviews.example.com",
+    });
+    const logged = await calls();
+    const note = logged.find((c) => c.args.join(" ").includes("notes --method POST"))!;
+    expect(note.args.find((a) => a.startsWith("body="))).toContain(
+      `Discuss this review: ${page}`,
+    );
+    const [status] = await statusCalls();
+    expect(status!.args).toEqual(expect.arrayContaining([`target_url=${page}`]));
   });
 
   it("edits the same note for the next head", async () => {

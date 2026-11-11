@@ -9,6 +9,7 @@ import {
   readSummaryMarker,
   renderFinding,
   renderSummary,
+  replyMarker,
   restate,
   statusLine,
   type Finding,
@@ -54,6 +55,18 @@ export interface Ctx {
   cr: ChangeRequest;
   /** Review bots whose threads count, from `reviewers.json`: exact logins, trusted only on a bot account. */
   bots?: string[];
+  reviewBase?: string;
+}
+
+export function reviewPage(
+  forgeId: string,
+  base: string | undefined,
+  repo: RepoId,
+  number: string,
+): string | undefined {
+  if (forgeId !== "gitlab" || !base?.trim()) return undefined;
+  const root = base.trim().replace(/\/+$/, "");
+  return `${root}/${repo.host}/${repo.path}/-/merge_requests/${number}`;
 }
 
 export const STOP_LABEL = "thurview:stop";
@@ -72,6 +85,8 @@ export interface FindingState {
   thread: string;
   url?: string;
   messages: { author: string; body: string }[];
+  /** What other people wrote on this finding. Untrusted. Own messages stay in `messages`. */
+  replies: { author: string; body: string }[];
   commit?: string;
 }
 
@@ -93,6 +108,8 @@ export interface ReviewState {
   others: OtherThread[];
   /** Why the reader asked to stop, when they did and the summary does not say so yet. */
   stop: string | null;
+  /** Top-level notes by other people, apart from a stop command. Untrusted. */
+  remarks: { id: string; author: string; body: string }[];
   /** The newest note id on the change request. */
   newest: string;
 }
@@ -177,6 +194,8 @@ export async function readState(ctx: Ctx): Promise<ReviewState> {
       });
     const m = t.author === me ? readFindingMarker(t.messages[0]?.body ?? "") : null;
     if (!m) continue;
+    const own = t.messages.filter((m) => m.author === me);
+    const replies = t.messages.filter((m) => m.author !== me);
     findings.push({
       id: m.id,
       category: m.category,
@@ -187,7 +206,8 @@ export async function readState(ctx: Ctx): Promise<ReviewState> {
       open: !t.resolved,
       thread: t.id,
       ...(t.url ? { url: t.url } : {}),
-      messages: t.messages.filter((m) => m.author === me),
+      messages: own,
+      replies,
       ...(t.commit ? { commit: t.commit } : {}),
     });
   }
@@ -200,7 +220,17 @@ export async function readState(ctx: Ctx): Promise<ReviewState> {
     : command
       ? `a /thurview stop comment by @${command.author}`
       : null;
-  return { summary, findings, others, stop, newest: maxId(...notes.map((n) => n.id)) };
+  const remarks = notes.filter(
+    (n) => n.author !== me && n !== summary?.note && !STOP_COMMAND.test(n.body),
+  );
+  return {
+    summary,
+    findings,
+    others,
+    remarks,
+    stop,
+    newest: maxId(...notes.map((n) => n.id)),
+  };
 }
 
 /**
@@ -224,6 +254,7 @@ export interface SyncResult {
   head: string;
   posted: { id: string; at: string }[];
   resolved: string[];
+  replying: { thread: string }[];
   duplicates: string[];
   open: number;
   blocking: number;
@@ -451,12 +482,36 @@ export async function sync(
     reviewedAt: new Date().toISOString(),
     ...(ended ? { ended } : {}),
   };
-  const body = renderSummary(pass, marker, cr.author, open, update);
+  const page = reviewPage(forge.id, ctx.reviewBase, repo, cr.number);
+  const body = renderSummary(pass, marker, cr.author, open, update, page);
+  const replies = pass.replies ?? [];
+  if (ended && replies.length)
+    throw new AxiError(
+      "the change request has ended; a reply would not be a review of its head",
+      "CONFLICT",
+      ["Leave pass.replies empty; the summary is the last word on an ended change request"],
+    );
+  const seenHashes = new Set<string>();
+  const planned: { thread: string; body: string }[] = [];
+  for (const reply of replies) {
+    const finding = st.findings.find((f) => f.thread === reply.thread);
+    if (!finding)
+      throw new AxiError(`no own finding thread ${reply.thread}`, "NOT_FOUND", [
+        "pass.replies names a thread from status reassess",
+      ]);
+    const tagged = replyMarker(reply.thread, reply.body);
+    if (seenHashes.has(tagged) || finding.messages.some((m) => m.body.startsWith(tagged)))
+      continue;
+    seenHashes.add(tagged);
+    planned.push({ thread: reply.thread, body: reply.body });
+  }
+  const replying = planned.map(({ thread }) => ({ thread }));
   const result: SyncResult = {
     summary: opts.dryRun ? "dry-run" : st.summary ? "edited" : "created",
     head: reviewed,
     posted: ended ? [] : fresh.map(({ id, f }) => ({ id, at: `${f.path}:${f.line}` })),
     resolved: ended ? [] : fixed,
+    replying,
     duplicates,
     open: open.length,
     blocking,
@@ -473,7 +528,7 @@ export async function sync(
   if (ended) {
     if (st.summary) await forge.editNote(repo, cr, st.summary.note.id, body);
     else await forge.postNote(repo, cr, body);
-    await setReviewStatus(ctx, reviewed, pass, open);
+    await setReviewStatus(ctx, reviewed, pass, open, page);
     return result;
   }
   for (const { id, f } of fresh) {
@@ -504,10 +559,19 @@ export async function sync(
       assessment.status === "fixed" && f.open,
     );
   }
-  result.body = renderSummary(pass, marker, cr.author, open, update);
+  for (const item of planned) {
+    await forge.reply(
+      repo,
+      cr,
+      item.thread,
+      `${replyMarker(item.thread, item.body)}\n${item.body.trim()}`,
+      false,
+    );
+  }
+  result.body = renderSummary(pass, marker, cr.author, open, update, page);
   if (st.summary) await forge.editNote(repo, cr, st.summary.note.id, result.body);
   else await forge.postNote(repo, cr, result.body);
-  await setReviewStatus(ctx, reviewed, pass, open);
+  await setReviewStatus(ctx, reviewed, pass, open, page);
   return result;
 }
 
@@ -516,7 +580,13 @@ export async function sync(
  * success only at 5 with nothing open. A push leaves the new head without one
  * until a pass reviews it, so a branch rule requiring it holds every head.
  */
-async function setReviewStatus(ctx: Ctx, sha: string, pass: Pass, open: OpenFinding[]) {
+async function setReviewStatus(
+  ctx: Ctx,
+  sha: string,
+  pass: Pass,
+  open: OpenFinding[],
+  page?: string,
+) {
   const blocking = open.filter((f) => f.severity === "blocking").length;
   const clean = pass.confidence === 5 && !open.length;
   const counts = open.length
@@ -526,7 +596,7 @@ async function setReviewStatus(ctx: Ctx, sha: string, pass: Pass, open: OpenFind
     context: REVIEW_STATUS,
     state: clean ? "success" : "failure",
     description: `Confidence ${pass.confidence}/5 · ${counts}`,
-    url: ctx.cr.url,
+    url: page ?? ctx.cr.url,
   });
 }
 

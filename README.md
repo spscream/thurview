@@ -73,6 +73,8 @@ review is stored there - its state is in hidden markers on the forge.
   repository root for that repository.
 - **Trusted review bots**: `~/.thurview/reviewers.json`, as
   `{"bots": ["greptile-apps[bot]"]}`, whose threads the review answers.
+- **Review page**: `THURVIEW_REVIEW_BASE`, unset by default. On GitLab it
+  links that page from the summary and from the `thurview/review` status.
 
 ## Documentation
 
